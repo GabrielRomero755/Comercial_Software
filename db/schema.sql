@@ -1,27 +1,24 @@
 -- ==========================================================
 --  Sistema de Comercio — Esquema de Base de Datos (SQLite)
---  Archivo: db/init_db.sql (actualizado)
+--  Archivo: db/schema.sql
 --
---  Cambios clave vs. versión anterior
+--  Descripción
 --  ----------------------------------------------------------
---  - Ventas:
---      * El total SIEMPRE = precio * (kilos OR unidades).
---      * num_cajas ya NO cuenta para el cálculo (solo metadato/stock).
---      * Post-venta: estado (ACTIVA/CANCELADA), fecha y motivo de cancelación.
---      * Bitácora: ventas_eventos (opcional para auditoría).
+--  - Ventas: total SIEMPRE = precio * (kilos OR unidades).
+--    num_cajas es solo informativo (stock); no influye en el total.
+--    Soporta post-venta (cancelación/modificación).
 --  - Clientes: +direccion.
---  - Proveedores: catálogo con deuda_total y CRUD.
---  - Compras a proveedor (contado/crédito) + pagos_proveedor.
---  - Gastos: pueden asociarse a empleado o cliente (CRUD de empleados).
---  - Índices útiles para reportes y búsquedas.
---  - Tabla schema_migrations (para compatibilidad con migraciones).
+--  - Proveedores y Compras a crédito, + pagos_proveedor.
+--  - Gastos: opcionalmente asociados a empleados o clientes.
+--  - Índices para búsquedas/reportes.
+--  - Idempotente (IF NOT EXISTS / INSERT OR IGNORE).
 -- ==========================================================
 
 PRAGMA foreign_keys = ON;
 -- PRAGMA journal_mode = WAL;  -- opcional
 
 -- ==========================================================
--- Tabla: schema_migrations (soporte de migraciones incrementales)
+-- Soporte de migraciones (opcional)
 -- ==========================================================
 CREATE TABLE IF NOT EXISTS schema_migrations (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -57,7 +54,7 @@ CREATE TABLE IF NOT EXISTS clientes (
 CREATE INDEX IF NOT EXISTS idx_clientes_nombre ON clientes(nombre);
 
 -- ==========================================================
--- Tabla: empleados (para vincular gastos de tipo "salario" u otros)
+-- Tabla: empleados (para gastos de tipo salario u otros)
 -- ==========================================================
 CREATE TABLE IF NOT EXISTS empleados (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -68,7 +65,7 @@ CREATE TABLE IF NOT EXISTS empleados (
 CREATE INDEX IF NOT EXISTS idx_empleados_nombre ON empleados(nombre);
 
 -- ==========================================================
--- Tabla: proveedores (compras y deudas con terceros)
+-- Tabla: proveedores
 -- ==========================================================
 CREATE TABLE IF NOT EXISTS proveedores (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -80,15 +77,15 @@ CREATE INDEX IF NOT EXISTS idx_proveedores_nombre ON proveedores(nombre);
 
 -- ==========================================================
 -- Tabla: ventas
---   * num_cajas es informativo/stock; NO influye en el total.
---   * El total proviene de kilos*precio o unidades*precio (según modalidad).
---   * Post-venta: cancelación de ventas registradas.
+--   * num_cajas = informativo/stock; NO influye en el total.
+--   * Modalidad válida: por KILOS o por UNIDADES (exclusivas).
+--   * Post-venta: cancelación/modificación.
 -- ==========================================================
 CREATE TABLE IF NOT EXISTS ventas (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     producto_id         INTEGER NOT NULL,
     kilos               REAL    NOT NULL DEFAULT 0.0  CHECK (kilos >= 0),
-    num_cajas           REAL    NOT NULL DEFAULT 0.0  CHECK (num_cajas >= 0), -- informativo
+    num_cajas           REAL    NOT NULL DEFAULT 0.0  CHECK (num_cajas >= 0),
     unidades            INTEGER NOT NULL DEFAULT 0    CHECK (unidades >= 0),
     precio              REAL    NOT NULL              CHECK (precio > 0),
     total               REAL    NOT NULL DEFAULT 0.0  CHECK (total >= 0),
@@ -101,7 +98,6 @@ CREATE TABLE IF NOT EXISTS ventas (
     motivo_cancelacion  TEXT,
     FOREIGN KEY (producto_id) REFERENCES productos(id),
     FOREIGN KEY (cliente_id)  REFERENCES clientes(id),
-    -- Asegura modalidad válida: por KILOS o por UNIDADES
     CHECK ( (kilos > 0 AND unidades = 0) OR (unidades > 0 AND kilos = 0) )
 );
 CREATE INDEX IF NOT EXISTS idx_ventas_fecha        ON ventas(fecha);
@@ -110,7 +106,7 @@ CREATE INDEX IF NOT EXISTS idx_ventas_cliente      ON ventas(cliente_id);
 CREATE INDEX IF NOT EXISTS idx_ventas_tipo         ON ventas(tipo_venta);
 CREATE INDEX IF NOT EXISTS idx_ventas_estado       ON ventas(estado);
 
--- Bitácora de eventos de venta (creación, modificación, cancelación)
+-- Bitácora de eventos de venta (creada/modificada/cancelada)
 CREATE TABLE IF NOT EXISTS ventas_eventos (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
     venta_id  INTEGER NOT NULL,
@@ -160,8 +156,6 @@ CREATE INDEX IF NOT EXISTS idx_mermas_fecha    ON mermas(fecha);
 
 -- ==========================================================
 -- Tabla: pagos_credito (pagos individuales de clientes)
---    * Se mantiene el nombre por compatibilidad existente.
---    * Se puede exponer como "pagos_cliente" mediante una Vista.
 -- ==========================================================
 CREATE TABLE IF NOT EXISTS pagos_credito (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -174,14 +168,12 @@ CREATE TABLE IF NOT EXISTS pagos_credito (
 CREATE INDEX IF NOT EXISTS idx_pagos_credito_cliente ON pagos_credito(cliente_id);
 CREATE INDEX IF NOT EXISTS idx_pagos_credito_fecha   ON pagos_credito(fecha);
 
--- Vista alias (nomenclatura más clara para reportes nuevos)
+-- Vista alias para reportes (nomenclatura clara)
 CREATE VIEW IF NOT EXISTS pagos_cliente AS
 SELECT id, cliente_id, monto, fecha, descripcion FROM pagos_credito;
 
 -- ==========================================================
--- Compras a proveedores (entradas operativas) + pagos_proveedor
---  - tipo_compra: 'contado' | 'credito'
---  - num_cajas informativo/stock (como en ventas)
+-- Compras a proveedores + pagos_proveedor
 -- ==========================================================
 CREATE TABLE IF NOT EXISTS compras (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -190,7 +182,7 @@ CREATE TABLE IF NOT EXISTS compras (
     kilos         REAL    NOT NULL DEFAULT 0.0  CHECK (kilos >= 0),
     num_cajas     REAL    NOT NULL DEFAULT 0.0  CHECK (num_cajas >= 0),
     unidades      INTEGER NOT NULL DEFAULT 0    CHECK (unidades >= 0),
-    precio        REAL    NOT NULL DEFAULT 0.0  CHECK (precio >= 0), -- puede ser 0 si no aplica
+    precio        REAL    NOT NULL DEFAULT 0.0  CHECK (precio >= 0),
     total         REAL    NOT NULL DEFAULT 0.0  CHECK (total >= 0),
     fecha         TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
     tipo_compra   TEXT    NOT NULL DEFAULT 'contado' CHECK (tipo_compra IN ('contado','credito')),
@@ -215,7 +207,7 @@ CREATE INDEX IF NOT EXISTS idx_pagos_proveedor_prov  ON pagos_proveedor(proveedo
 CREATE INDEX IF NOT EXISTS idx_pagos_proveedor_fecha ON pagos_proveedor(fecha);
 
 -- ==========================================================
--- Tabla: gastos (ahora pueden asociarse a empleado o cliente)
+-- Tabla: gastos (asociables a empleado o cliente)
 -- ==========================================================
 CREATE TABLE IF NOT EXISTS gastos (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -223,8 +215,8 @@ CREATE TABLE IF NOT EXISTS gastos (
     monto        REAL    NOT NULL CHECK (monto >= 0),
     descripcion  TEXT,
     fecha        TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
-    empleado_id  INTEGER,  -- NUEVO: para salarios, etc.
-    cliente_id   INTEGER,  -- NUEVO: asociar gasto a cliente si aplica
+    empleado_id  INTEGER,
+    cliente_id   INTEGER,
     FOREIGN KEY (empleado_id) REFERENCES empleados(id),
     FOREIGN KEY (cliente_id)  REFERENCES clientes(id)
 );
@@ -244,11 +236,3 @@ INSERT OR IGNORE INTO tipos_gasto (nombre) VALUES
 ('Salarios'),
 ('Préstamos'),
 ('Gastos Generales');
-
--- ==========================================================
--- Notas:
---  * No se crean triggers de actualización automática de deuda_total
---    (clientes/proveedores) para evitar duplicidades con lógica de la app.
---    Puedes manejarlos desde el código existente (como ya ocurre en ventas).
---  * Este script es idempotente gracias a IF NOT EXISTS / INSERT OR IGNORE.
--- ==========================================================
