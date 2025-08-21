@@ -1,3 +1,35 @@
-1. Mejorar el frotend
+Roadmap sugerido (orden óptimo)
 
-1. creditos.py 2. gastos.py 3. calendar.py 4. reportes.py 5. ventas.py 6. inventario.py 7. mermas.py 8. productos.py 9. ventas.py 10. main.py
+Modelo de datos + migraciones
+
+Crear tablas nuevas, columnas, índices y activar FK.
+
+Ajustar helpers para Decimal/NUMERIC.
+
+Inventario + Proveedores + CXP
+
+CRUD de proveedores, compras (contado/crédito) y pagos a proveedor.
+
+Entradas enlazadas.
+
+Ventas (cálculo solo por kilos o por unidades) + Post-venta + Tickets
+
+Remover influencia de cajas en el cálculo (y dejar cajas como dato informativo).
+
+Cancelar/modificar ventas con auditoría.
+
+Generar e imprimir tickets (PDF/térmico).
+
+Pagos de Clientes + Reporte de Deudas de Clientes (mejorado)
+
+Registrar pagos individuales, agregar dirección y detalle de productos.
+
+Reporte de Deudas a Proveedores + Análisis de Ventas (ranking completo y general)
+
+Métricas y comparativos, exportación.
+
+Gastos (CRUD Empleados y Clientes + asociación en gastos)
+
+Tema visual y nueva identidad
+
+Paleta beige/rosa/café en toda la app y sustitución de assets.
