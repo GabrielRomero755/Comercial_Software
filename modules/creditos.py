@@ -11,55 +11,59 @@
 #       * Actualizar (refrescar desde BD)
 #       * Abonar monto (pago parcial, máx. 2 decimales)
 #       * Pagar deuda (liquidar a 0)
-# - Edición de datos del cliente (nombre/teléfono).
+# - Edición y eliminación de clientes (CRUD completo).
+# - Bitácora de abonos en 'pagos_credito'.
 #
-# MEJORAS DE UX (este commit)
+# MEJORAS DE UX
 # -----------------------------------------------------------
 # - Enter en Nombre/Teléfono => "Agregar Cliente".
 # - Enter en Buscar => filtra.
-# - Abonos: Enter confirma / Esc cierra (persistente).
-# - Modificar cliente: Enter guarda / Esc cierra (nuevo).
+# - Abonos: Enter confirma / Esc cierra.
+# - Modificar cliente: Enter guarda / Esc cierra.
+# - Doble clic en tabla => Modificar cliente.
 #
 # DETALLES TÉCNICOS
 # -----------------------------------------------------------
-# - Persistencia en tabla 'clientes' con columnas:
-#     id INTEGER PK AUTOINCREMENT
-#     nombre TEXT NOT NULL
-#     telefono TEXT
-#     deuda_total REAL DEFAULT 0
-# - El parseo/validación de números admite “.” o “,” como decimal
-#   y separadores de miles (helpers.to_float).
-# - Las entradas monetarias usan validación de máximo 2 decimales.
-# - Todas las operaciones de BD usan context managers (`with`) para
-#   asegurar commits/rollbacks adecuados.
-# - Cada abono se registra también en 'pagos_credito' (bitácora).
+# - Persistencia en:
+#     * clientes(id, nombre, telefono, deuda_total)
+#     * pagos_credito(id, cliente_id, monto, fecha, descripcion)
+# - Parseo/validación de números con helpers.to_float (coma/punto, miles).
+# - Entradas monetarias validan máx. 2 decimales durante edición.
+# - Conexiones SQLite con context manager y PRAGMA foreign_keys=ON.
+# - Tema de colores desde ui.theme (con fallbacks).
 # -----------------------------------------------------------
+
+from __future__ import annotations
 
 import tkinter as tk
 from tkinter import ttk, messagebox
+
 from db.database import get_connection
 from ui.helpers import redondear_dos_decimales, formato_moneda, to_float
 
-# -----------------------------------------------------------
-# Paleta oscura (consistente con main.py)
-# -----------------------------------------------------------
-COLOR_BG        = "#2C3E50"  # Fondo general
-COLOR_PANEL     = "#34495E"  # Paneles / contenedores
-COLOR_TEXT      = "#ECF0F1"  # Texto
-COLOR_PRIMARY   = "#3498DB"  # Botones principales
-COLOR_SUCCESS   = "#2ECC71"  # Confirmación / Éxito
-COLOR_DANGER    = "#E74C3C"  # Alerta / Error
-COLOR_ENTRY_BG  = "#3B4A5A"  # Fondo de entradas
-COLOR_ENTRY_FG  = COLOR_TEXT
-COLOR_SEL_BG    = "#1ABC9C"  # Selección en tablas
-COLOR_BORDER    = "#22313F"
+# Paleta desde tema centralizado (con fallbacks por si falta alguna clave)
+try:
+    from ui.theme import THEME
+except Exception:
+    THEME = {}
+
+COLOR_BG        = THEME.get("bg", "#2C3E50")
+COLOR_PANEL     = THEME.get("panel", "#34495E")
+COLOR_TEXT      = THEME.get("text", "#ECF0F1")
+COLOR_PRIMARY   = THEME.get("primary", "#3498DB")
+COLOR_SUCCESS   = THEME.get("success", "#2ECC71")
+COLOR_DANGER    = THEME.get("danger", "#E74C3C")
+COLOR_ENTRY_BG  = THEME.get("entry_bg", "#3B4A5A")
+COLOR_ENTRY_FG  = THEME.get("entry_fg", COLOR_TEXT)
+COLOR_SEL_BG    = THEME.get("selection", "#1ABC9C")
+COLOR_BORDER    = THEME.get("border", "#22313F")
 
 
 class CreditosFrame(tk.Frame):
     def __init__(self, master=None):
         super().__init__(master, bg=COLOR_BG, highlightthickness=0, bd=0)
 
-        # Layout raíz (todo con grid para hacerlo responsive)
+        # Layout raíz (grid responsive)
         self.grid_rowconfigure(0, weight=0)  # alta
         self.grid_rowconfigure(1, weight=0)  # búsqueda
         self.grid_rowconfigure(2, weight=1)  # tabla
@@ -181,7 +185,7 @@ class CreditosFrame(tk.Frame):
         self._btn(frame_form, "Agregar Cliente", COLOR_SUCCESS, self.agregar_cliente,
                   row=2, column=0, columnspan=2, pady=10, padx=8, sticky="w")
 
-        # -- NUEVO: Enter en nombre/teléfono => Agregar cliente
+        # Enter en nombre/teléfono => Agregar
         self.nombre_entry.bind("<Return>", lambda e: self.agregar_cliente())
         self.telefono_entry.bind("<Return>", lambda e: self.agregar_cliente())
 
@@ -196,7 +200,6 @@ class CreditosFrame(tk.Frame):
         self.buscar_entry = self._estilo_entry(busc_panel, width=40,
                                                row=0, column=1, padx=8, pady=(8, 6), sticky="we")
         self.buscar_entry.bind("<KeyRelease>", self.filtrar_clientes)
-        # -- NUEVO: Enter en buscar => aplicar filtro
         self.buscar_entry.bind("<Return>", self.filtrar_clientes)
 
         # --------- Fila 2: Tabla (con scrollbars) ----------
@@ -237,10 +240,13 @@ class CreditosFrame(tk.Frame):
             tipos={"ID": "int", "Nombre": "str", "Teléfono": "str", "Deuda": "money"},
         )
 
+        # Doble clic para modificar
+        self.tree.bind("<Double-1>", lambda e: self.modificar_cliente())
+
         # --------- Fila 3: Botones de acción ----------
         btn_frame = self._panel(self)
         btn_frame.grid(row=3, column=0, sticky="ew", padx=10, pady=(0, 10))
-        for c in range(4):
+        for c in range(5):
             btn_frame.grid_columnconfigure(c, weight=1, uniform="btns")
 
         self._btn(btn_frame, "Actualizar Deuda", COLOR_PRIMARY, self.actualizar_deuda,
@@ -251,6 +257,9 @@ class CreditosFrame(tk.Frame):
                   row=0, column=2, padx=5, pady=4, sticky="ew")
         self._btn(btn_frame, "Modificar Cliente", COLOR_PRIMARY, self.modificar_cliente,
                   row=0, column=3, padx=5, pady=4, sticky="ew")
+        # NUEVO: Eliminar (CRUD completo)
+        self._btn(btn_frame, "Eliminar Cliente", COLOR_DANGER, self.eliminar_cliente,
+                  row=0, column=4, padx=5, pady=4, sticky="ew")
 
     # ---------------------------
     # Acciones
@@ -266,8 +275,7 @@ class CreditosFrame(tk.Frame):
 
         try:
             with get_connection() as conn:
-                cur = conn.cursor()
-                cur.execute(
+                conn.execute(
                     "INSERT INTO clientes (nombre, telefono, deuda_total) VALUES (?, ?, ?)",
                     (nombre, telefono, 0.0),
                 )
@@ -283,10 +291,9 @@ class CreditosFrame(tk.Frame):
         self.tree.delete(*self.tree.get_children())
         try:
             with get_connection() as conn:
-                cur = conn.cursor()
                 if filtro:
                     like = f"%{filtro}%"
-                    cur.execute(
+                    rows = conn.execute(
                         """
                         SELECT id, nombre, telefono, deuda_total
                         FROM clientes
@@ -294,12 +301,13 @@ class CreditosFrame(tk.Frame):
                         ORDER BY nombre COLLATE NOCASE
                         """,
                         (like, like),
-                    )
+                    ).fetchall()
                 else:
-                    cur.execute(
+                    rows = conn.execute(
                         "SELECT id, nombre, telefono, deuda_total FROM clientes ORDER BY nombre COLLATE NOCASE"
-                    )
-                for cid, nombre, tel, deuda in cur.fetchall():
+                    ).fetchall()
+
+                for cid, nombre, tel, deuda in rows:
                     self.tree.insert("", "end", values=(cid, nombre, tel or "", formato_moneda(deuda)))
         except Exception as e:
             messagebox.showerror("Error", f"No se pudieron cargar los clientes.\n{e}")
@@ -309,7 +317,7 @@ class CreditosFrame(tk.Frame):
         self.cargar_clientes(filtro)
 
     def actualizar_deuda(self):
-        """Refresca la lista desde DB."""
+        """Refresca la lista desde DB (la lógica de deuda se mantiene en ventas/pagos)."""
         self.cargar_clientes()
         messagebox.showinfo("Info", "Las deudas han sido actualizadas desde la base de datos.")
 
@@ -493,8 +501,7 @@ class CreditosFrame(tk.Frame):
 
             try:
                 with get_connection() as conn:
-                    cur = conn.cursor()
-                    cur.execute(
+                    conn.execute(
                         "UPDATE clientes SET nombre = ?, telefono = ? WHERE id = ?",
                         (nuevo_nombre, nuevo_telefono, cliente_id),
                     )
@@ -508,8 +515,44 @@ class CreditosFrame(tk.Frame):
                              bg=COLOR_SUCCESS, fg=COLOR_TEXT, activebackground=COLOR_SUCCESS,
                              activeforeground=COLOR_TEXT, relief="flat", padx=10, pady=6, cursor="hand2")
         btn_save.grid(row=2, column=0, columnspan=2, pady=10)
-        # NUEVO: Enter guarda
         ventana.bind("<Return>", guardar_cambios)
+
+    def eliminar_cliente(self):
+        """
+        Elimina el cliente seleccionado si NO tiene registros vinculados en ventas o pagos_credito.
+        (El esquema no define ON DELETE CASCADE, así que validamos manualmente).
+        """
+        item = self.tree.focus()
+        if not item:
+            messagebox.showerror("Error", "Selecciona un cliente para eliminar.")
+            return
+
+        valores = self.tree.item(item, "values")
+        cliente_id = int(valores[0])
+        nombre = valores[1]
+
+        if not messagebox.askyesno("Confirmar", f"¿Eliminar definitivamente al cliente '{nombre}'?"):
+            return
+
+        try:
+            with get_connection() as conn:
+                cur = conn.cursor()
+                ventas_ct = cur.execute("SELECT COUNT(*) FROM ventas WHERE cliente_id = ?", (cliente_id,)).fetchone()[0]
+                pagos_ct  = cur.execute("SELECT COUNT(*) FROM pagos_credito WHERE cliente_id = ?", (cliente_id,)).fetchone()[0]
+
+                if ventas_ct > 0 or pagos_ct > 0:
+                    messagebox.showwarning(
+                        "No permitido",
+                        "No se puede eliminar el cliente porque tiene ventas o pagos asociados.\n"
+                        "Sugerencia: conserva el registro o anonimízalo editando el nombre.",
+                    )
+                    return
+
+                cur.execute("DELETE FROM clientes WHERE id = ?", (cliente_id,))
+            self.cargar_clientes()
+            messagebox.showinfo("Éxito", f"Cliente '{nombre}' eliminado.")
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo eliminar el cliente.\n{e}")
 
     # ---------------------------
     # Ordenamiento por columnas
@@ -571,7 +614,10 @@ class CreditosFrame(tk.Frame):
 # Punto de entrada desde main.py
 def mostrar(frame_contenido):
     for widget in frame_contenido.winfo_children():
-        widget.destroy()
+        try:
+            widget.destroy()
+        except Exception:
+            pass
     frame = CreditosFrame(frame_contenido)
     # Si el contenedor usa grid en main, asegura expansión completa
     try:

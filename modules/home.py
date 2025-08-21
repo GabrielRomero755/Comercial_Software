@@ -3,22 +3,43 @@
 # Página de Inicio — Pantalla inicial con logo centrado
 # -----------------------------------------------------------
 # Muestra el fondo del panel y el logo de la empresa en el centro,
-# con slogan debajo. Todo es responsivo: el logo y el texto escalan
-# con el tamaño de la ventana (si Pillow está disponible).
-# Además, maneja correctamente eventos al destruirse para evitar
-# TclError cuando se cambia de vista durante redimensionados.
+# con nombre de la empresa y slogan debajo. Todo es responsivo:
+# el logo y los textos escalan con el tamaño de la ventana (si Pillow
+# está disponible). Maneja correctamente eventos al destruirse para
+# evitar TclError durante redimensionados/cambios de vista.
 #
 # Mejoras:
-# - Slogan configurable por variable de entorno APP_SLOGAN.
-# - Métodos públicos set_slogan() y set_logo() para actualizar
-#   el contenido en caliente sin reconstruir la vista.
+# - Integra paleta desde ui.theme (THEME).
+# - Rutas de assets con resource_path (soporta PyInstaller).
+# - Variables de entorno:
+#       APP_COMPANY → nombre de la empresa (default: "Ajos La Misión")
+#       APP_SLOGAN  → slogan (default: "Intelligence in every system")
+# - API pública: set_company(), set_slogan(), set_logo() para actualizar
+#   contenido en caliente sin reconstruir la vista.
+# - Montaje por grid con fallback a pack (coherente con otros módulos).
 # -----------------------------------------------------------
+
+from __future__ import annotations
 
 import os
 import tkinter as tk
 from tkinter import font as tkfont
 from tkinter import TclError
-from typing import Optional  # Compatibilidad Py3.8 (Optional en lugar de X | None)
+from typing import Optional
+
+# Tema centralizado y utilidades
+try:
+    from ui.theme import THEME
+except Exception:
+    THEME = {}
+try:
+    from ui.helpers import resource_path
+except Exception:
+    # Fallback mínimo si helpers aún no está disponible
+    import sys
+    def resource_path(*relative_parts: str) -> str:
+        base_path = getattr(sys, "_MEIPASS", os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+        return os.path.normpath(os.path.join(base_path, *relative_parts))
 
 # Intentar usar Pillow para reescalar suavemente (opcional)
 try:
@@ -27,30 +48,42 @@ try:
 except Exception:
     _PIL_OK = False
 
-# Paleta coherente con el sistema
-COLOR_PANEL  = "#34495E"  # fondo de panel
-COLOR_TEXT   = "#ECF0F1"  # color de texto
-COLOR_BORDER = "#22313F"  # borde tenue para el contenedor
+# Colores desde THEME (con defaults oscuros)
+COLOR_BG     = THEME.get("panel", "#34495E")   # fondo del panel principal
+COLOR_TEXT   = THEME.get("text", "#ECF0F1")    # color de texto
+COLOR_BORDER = THEME.get("border", "#22313F")  # borde tenue para el contenedor
 
-# Rutas posibles del logo (ajústalas si tu estructura difiere)
-THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+# Candidatos por defecto del logo (resueltos con resource_path)
 DEFAULT_LOGO_CANDIDATES = [
-    os.path.normpath(os.path.join(THIS_DIR, "..", "assets", "logo.png")),
-    os.path.normpath(os.path.join(os.getcwd(), "assets", "logo.png")),
+    resource_path("assets", "logo.png"),
+    resource_path("logo.png"),
 ]
 
 
 class HomeFrame(tk.Frame):
-    def __init__(self, master=None, logo_path: Optional[str] = None, slogan: Optional[str] = None):
-        super().__init__(master, bg=COLOR_PANEL, highlightthickness=0, bd=0)
+    def __init__(self, master=None, logo_path: Optional[str] = None,
+                 company: Optional[str] = None, slogan: Optional[str] = None):
+        super().__init__(master, bg=COLOR_BG, highlightthickness=0, bd=0)
 
         # Estado para manejo seguro de eventos y temporizadores
         self._destroyed = False
         self._after_id: Optional[str] = None
         self._after_idle_id: Optional[str] = None
 
-        # --- Tipografías (JetBrains Mono con fallbacks) ---
+        # --- Tipografías con fallbacks amigables ---
         familias = {f.lower(): f for f in tkfont.families()}
+        # Título empresa (sans)
+        if "segoe ui" in familias:
+            title_family = familias["segoe ui"]
+        elif "inter" in familias:
+            title_family = familias["inter"]
+        elif "arial" in familias:
+            title_family = familias["arial"]
+        else:
+            title_family = "TkDefaultFont"
+        self.company_font = tkfont.Font(family=title_family, size=26, weight="bold")
+
+        # Slogan (mono/semi-mono para contraste)
         if "jetbrains mono" in familias:
             mono_family = familias["jetbrains mono"]
         elif "jetbrainsmono" in familias:
@@ -61,33 +94,35 @@ class HomeFrame(tk.Frame):
             mono_family = familias["courier new"]
         else:
             mono_family = "TkFixedFont"
-        self.slogan_font = tkfont.Font(family=mono_family, size=18, weight="bold")
+        self.slogan_font = tkfont.Font(family=mono_family, size=16, weight="bold")
 
         # --- Contenedor central tipo "card" ---
-        self.center = tk.Frame(self, bg=COLOR_PANEL, highlightthickness=1, highlightbackground=COLOR_BORDER)
+        self.center = tk.Frame(self, bg=COLOR_BG, highlightthickness=1, highlightbackground=COLOR_BORDER)
         self.center.pack(expand=True, fill="both", padx=24, pady=24)
 
-        # Widgets / estado imagen
+        # Estado imagen
         self.logo_path = self._resolver_logo_path(logo_path)
         self._pil_img = None      # imagen original (Pillow) si disponible
-        self._base_photo = None   # imagen base PhotoImage (fallback sin Pillow)
+        self._base_photo = None   # PhotoImage como fallback sin Pillow
         self._img_tk = None       # imagen renderizada actual para Tk
         self._last_wh = (0, 0)    # último tamaño renderizado (ancho, alto)
 
-        self.logo_label = tk.Label(self.center, bg=COLOR_PANEL, bd=0, highlightthickness=0)
-        self.logo_label.pack(padx=10, pady=(10, 6))
+        # Widgets
+        self.company_label = tk.Label(self.center, bg=COLOR_BG, fg=COLOR_TEXT, font=self.company_font)
+        self.company_label.pack(padx=10, pady=(14, 6))
 
-        # Slogan configurable: parámetro > APP_SLOGAN > valor por defecto
+        self.logo_label = tk.Label(self.center, bg=COLOR_BG, bd=0, highlightthickness=0)
+        self.logo_label.pack(padx=10, pady=(6, 6))
+
+        # Nombre y slogan (parámetro > env > defaults)
+        self._company = company if company is not None else os.getenv("APP_COMPANY", "Ajos La Misión")
         self._slogan_text = slogan if slogan is not None else os.getenv("APP_SLOGAN", "Intelligence in every system")
-        self.slogan_label = tk.Label(
-            self.center,
-            text=self._slogan_text,
-            bg=COLOR_PANEL,
-            fg=COLOR_TEXT,
-            font=self.slogan_font,
-        )
-        self.slogan_label.pack(padx=10, pady=(0, 10))
 
+        self.company_label.configure(text=self._company)
+        self.slogan_label = tk.Label(self.center, text=self._slogan_text, bg=COLOR_BG, fg=COLOR_TEXT, font=self.slogan_font)
+        self.slogan_label.pack(padx=10, pady=(0, 12))
+
+        # Cargar logo
         self._cargar_logo()
 
         # Vincular eventos de tamaño (con guardas)
@@ -100,12 +135,10 @@ class HomeFrame(tk.Frame):
         self.bind("<Destroy>", self._on_destroy, add="+")
 
     # -------------------------------------------------------
-    # API pública (mejoras)
+    # API pública
     # -------------------------------------------------------
     def set_slogan(self, text: str):
-        """
-        Actualiza el slogan mostrado bajo el logo.
-        """
+        """Actualiza el slogan mostrado bajo el logo."""
         if self._destroyed:
             return
         self._slogan_text = text or ""
@@ -115,10 +148,19 @@ class HomeFrame(tk.Frame):
             pass
         self._refresh()
 
+    def set_company(self, name: str):
+        """Actualiza el nombre de la empresa mostrado sobre el logo."""
+        if self._destroyed:
+            return
+        self._company = name or ""
+        try:
+            self.company_label.configure(text=self._company)
+        except TclError:
+            pass
+        self._refresh()
+
     def set_logo(self, path: str):
-        """
-        Cambia el logo en caliente. Si la ruta no existe, muestra placeholder.
-        """
+        """Cambia el logo en caliente. Si la ruta no existe, muestra placeholder."""
         if self._destroyed:
             return
         # Limpiar imágenes previas
@@ -135,7 +177,6 @@ class HomeFrame(tk.Frame):
     # -------------------------------------------------------
     def _on_destroy(self, _event=None):
         self._destroyed = True
-        # Cancelar temporizadores pendientes
         try:
             if self._after_id:
                 self.after_cancel(self._after_id)
@@ -161,7 +202,7 @@ class HomeFrame(tk.Frame):
         for cand in DEFAULT_LOGO_CANDIDATES:
             if os.path.exists(cand):
                 return cand
-        # Devolver la primera ruta por consistencia (aunque no exista) para logs/depuración.
+        # Devolver la primera ruta por consistencia (aunque no exista)
         return DEFAULT_LOGO_CANDIDATES[0]
 
     # -------------------------------------------------------
@@ -174,15 +215,13 @@ class HomeFrame(tk.Frame):
                 try:
                     img = Image.open(self.logo_path).convert("RGBA")
                     self._pil_img = img
-                    # No configuramos aún la label; la imagen final se setea en _refresh()
-                    return
+                    return  # se renderiza en _refresh
                 except Exception:
                     self._pil_img = None
-            # Fallback sin PIL (no se reescala con suavizado)
+            # Fallback sin PIL
             try:
                 self._base_photo = tk.PhotoImage(file=self.logo_path)
                 self.logo_label.configure(image=self._base_photo, text="")
-                # Mantener referencia para evitar GC
                 self.logo_label.image = self._base_photo
                 return
             except Exception:
@@ -193,7 +232,7 @@ class HomeFrame(tk.Frame):
             image="",
             text="LOGO",
             fg=COLOR_TEXT,
-            font=(self.slogan_font.actual("family"), 28, "bold"),
+            font=(self.company_font.actual("family"), 28, "bold"),
             padx=24,
             pady=24,
         )
@@ -213,12 +252,11 @@ class HomeFrame(tk.Frame):
         self._refresh()
 
     def _refresh(self):
-        """Ajusta el tamaño del logo y del texto al redimensionar."""
+        """Ajusta tamaños del logo y textos al redimensionar."""
         if self._destroyed:
             return
 
-        # Si había un after pendiente para _refresh, limpiarlo (ya estamos ejecutando)
-        self._after_id = None
+        self._after_id = None  # ya estamos ejecutando
 
         # Tamaño real disponible del contenedor central
         try:
@@ -234,21 +272,23 @@ class HomeFrame(tk.Frame):
             self._after_id = self.after(30, self._refresh)
             return
 
-        # Evitar renders redundantes muy seguidos
+        # Evitar renders redundantes
         if abs(w - self._last_wh[0]) < 4 and abs(h - self._last_wh[1]) < 4:
             return
         self._last_wh = (w, h)
 
-        # --- Escala del slogan (entre 14 y 36 pt según ancho del centro) ---
+        # Escala de textos (responsive)
         try:
-            size = max(14, min(36, w // 20))
-            self.slogan_font.configure(size=size)
+            company_size = max(18, min(40, w // 18))
+            slogan_size  = max(12, min(30, w // 26))
+            self.company_font.configure(size=company_size)
+            self.slogan_font.configure(size=slogan_size)
         except TclError:
             return
 
-        # --- Reescalar el logo ---
-        max_logo_w = int(w * 0.55)  # 55% del ancho
-        max_logo_h = int(h * 0.65)  # 65% del alto (deja espacio para el slogan)
+        # Reescalar el logo
+        max_logo_w = int(w * 0.45)  # 45% del ancho
+        max_logo_h = int(h * 0.55)  # 55% del alto
         max_logo_w = max(80, max_logo_w)
         max_logo_h = max(80, max_logo_h)
 
@@ -259,7 +299,7 @@ class HomeFrame(tk.Frame):
                     scale = min(max_logo_w / iw, max_logo_h / ih)
                     scale = max(0.1, min(4.0, scale))
                     new_w, new_h = max(1, int(iw * scale)), max(1, int(ih * scale))
-                    # Compatibilidad con Pillow moderno y antiguo
+                    # Compatibilidad Pillow
                     try:
                         resample = Image.Resampling.LANCZOS  # Pillow >= 9.1
                     except Exception:
@@ -283,9 +323,8 @@ class HomeFrame(tk.Frame):
                     self._img_tk = img
                     self.logo_label.configure(image=self._img_tk, text="")
                     self.logo_label.image = self._img_tk  # referencia fuerte
-            # Si no hay imagen válida, ya queda el placeholder configurado en _cargar_logo()
+            # Si no hay imagen válida, ya queda el placeholder configurado
         except TclError:
-            # Puede ocurrir si el widget desaparece durante el render
             return
 
 
@@ -296,4 +335,8 @@ def mostrar(frame_contenido):
     for w in frame_contenido.winfo_children():
         w.destroy()
     frame = HomeFrame(frame_contenido)
-    frame.pack(fill="both", expand=True)
+    # Preferir grid como en el resto de módulos; fallback a pack si procede
+    try:
+        frame.grid(row=0, column=0, sticky="nsew")
+    except Exception:
+        frame.pack(fill="both", expand=True)

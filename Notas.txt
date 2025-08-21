@@ -1,8 +1,5 @@
 Roadmap sugerido (orden óptimo)
 
-Modelo de datos + migraciones
-
-Crear tablas nuevas, columnas, índices y activar FK.
 
 Ajustar helpers para Decimal/NUMERIC.
 

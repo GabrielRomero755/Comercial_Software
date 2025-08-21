@@ -27,24 +27,40 @@
 #
 # DETALLES TÉCNICOS
 # -----------------------------------------------------------
+# - Usa la paleta centralizada de ui.theme (beige/rosa/café por defecto).
 # - Carga fechas del mes visible en una sola consulta por tabla.
 # - Conexión a DB con context manager.
-# - Solo permite tablas conocidas ('ventas', 'gastos') en modo filtrado.
+# - Permite tablas dinámicas (solo si existen en sqlite_master).
 # -----------------------------------------------------------
+
+from __future__ import annotations
 
 import tkinter as tk
 import calendar
 from datetime import datetime
 from typing import Iterable, Dict, Set
-from db.database import get_connection
 
-# Paleta oscura (consistente con main.py)
-COLOR_BG       = "#2C3E50"  # Fondo general
-COLOR_PANEL    = "#34495E"  # Panel/encabezados
-COLOR_TEXT     = "#ECF0F1"  # Texto
-COLOR_PRIMARY  = "#3498DB"  # Botones principales
-COLOR_ENTRY_BG = "#3B4A5A"  # Celdas/áreas intermedias
-COLOR_MUTED_TX = "#95A5A6"  # Texto atenuado para días sin actividad
+from db.database import get_connection
+try:
+    # Paleta/tema centralizados
+    from ui.theme import THEME
+except Exception:
+    THEME = {
+        "bg": "#2C3E50",
+        "panel": "#34495E",
+        "text": "#ECF0F1",
+        "primary": "#3498DB",
+        "entry_bg": "#3B4A5A",
+        "muted_text": "#95A5A6",
+    }
+
+# Colores desde el tema
+COLOR_BG       = THEME.get("bg", "#2C3E50")
+COLOR_PANEL    = THEME.get("panel", "#34495E")
+COLOR_TEXT     = THEME.get("text", "#ECF0F1")
+COLOR_PRIMARY  = THEME.get("primary", "#3498DB")
+COLOR_ENTRY_BG = THEME.get("entry_bg", "#3B4A5A")
+COLOR_MUTED_TX = THEME.get("muted_text", "#95A5A6")
 
 # Meses en español
 MESES_ES = [
@@ -58,7 +74,7 @@ class CalendarioWidget:
         """
         master   : tk.Frame o tk.Toplevel
         callback : Callable[[str], None] o tk.Entry
-        fuentes  : Iterable[str] (p.ej. ('ventas',), ('gastos',) o ('all',))
+        fuentes  : Iterable[str] (p.ej. ('ventas',), ('gastos',), ('all',))
         """
         self.master = master
 
@@ -82,10 +98,10 @@ class CalendarioWidget:
         # Modo libre si incluyen 'all' / '*' / 'todas'
         self._all_days_active = any(f in ("all", "*", "todas") for f in f_norm)
 
-        # Solo tablas permitidas cuando NO estamos en modo libre
-        self.fuentes = tuple(f for f in f_norm if f in ("ventas", "gastos")) or ("ventas",)
+        # En modo filtrado, conservar nombres solicitados (se validan contra sqlite_master después)
+        self.fuentes = tuple(f for f in f_norm if f not in ("all", "*", "todas")) or ("ventas",)
 
-        # Cache: día (int) -> set de fuentes presentes ese día (modo filtrado)
+        # Cache: día (int) -> set de fuentes presentes ese día
         self._dias_por_fuente: Dict[int, Set[str]] = {}
         # Mapa de botones de días para manejo de foco/enter
         self._day_buttons: Dict[int, tk.Button] = {}
@@ -178,7 +194,7 @@ class CalendarioWidget:
         top.after(50, _do_center)
 
     # -------------------------------------------------------
-    # Construcción del calendario (tema oscuro + responsive)
+    # Construcción del calendario (tema + responsive)
     # -------------------------------------------------------
     def build_calendar(self):
         """Redibuja el calendario para (self.current_month, self.current_year)."""
@@ -308,6 +324,16 @@ class CalendarioWidget:
     # -------------------------------------------------------
     # Datos
     # -------------------------------------------------------
+    def _table_exists(self, conn, name: str) -> bool:
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+                (name,)
+            ).fetchone()
+            return row is not None
+        except Exception:
+            return False
+
     def _cargar_dias_con_registros_mes(self, year: int, month: int):
         """Llena self._dias_por_fuente con los días del mes/año con registros."""
         self._dias_por_fuente.clear()
@@ -316,27 +342,30 @@ class CalendarioWidget:
 
         try:
             with get_connection() as conn:
-                cur = conn.cursor()
                 for fuente in self.fuentes:
-                    # Seguridad: solo tablas permitidas
-                    if fuente not in ("ventas", "gastos"):
+                    # Solo consultar si la tabla existe
+                    if not self._table_exists(conn, fuente):
                         continue
-                    cur.execute(
-                        f"""
-                        SELECT DISTINCT DATE(fecha)
-                        FROM {fuente}
-                        WHERE strftime('%Y', fecha) = ? AND strftime('%m', fecha) = ?
-                        """,
-                        (y, m),
-                    )
-                    for (fecha_str,) in cur.fetchall():
-                        if not fecha_str:
-                            continue
-                        try:
-                            d = int(fecha_str.split("-")[2])
-                            self._dias_por_fuente.setdefault(d, set()).add(fuente)
-                        except Exception:
-                            continue
+                    try:
+                        cur = conn.execute(
+                            f"""
+                            SELECT DISTINCT DATE(fecha)
+                            FROM {fuente}
+                            WHERE strftime('%Y', fecha) = ? AND strftime('%m', fecha) = ?
+                            """,
+                            (y, m),
+                        )
+                        for (fecha_str,) in cur.fetchall():
+                            if not fecha_str:
+                                continue
+                            try:
+                                d = int(fecha_str.split("-")[2])
+                                self._dias_por_fuente.setdefault(d, set()).add(fuente)
+                            except Exception:
+                                continue
+                    except Exception:
+                        # Ignorar errores por tablas con esquema distinto (sin columna fecha)
+                        continue
         except Exception:
             self._dias_por_fuente = {}
 
