@@ -2,27 +2,23 @@
 # -----------------------------------------------------------
 # Punto de entrada del Sistema de Comercio (GUI Tkinter)
 # + Barra de estado (status bar) para mensajes contextuales.
-# + Tema ttk oscuro global, atajos y persistencia de última vista.
-# + Respaldo de BD: el usuario elige carpeta en cada ejecución.
+# + Tema ttk unificado (ui.theme) y atajos globales.
+# + Persistencia de última vista.
+# + Respaldo de BD con diálogo de carpeta (backup nativo SQLite).
 # -----------------------------------------------------------
 
 import os
+import sys
 import json
 import sqlite3
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
-
 from modules import productos, inventario, ventas, reportes, creditos, mermas, gastos, home
 from ui.helpers import centrar_ventana
-from db.database import init_db, get_connection
+from db.database import init_db, get_connection  # noqa: F401  (get_connection se usa indirectamente por módulos)
+from ui.theme import apply_brand_ttk_theme, BRAND_PALETTE
 
-# Paleta oscura
-COLOR_BG        = "#2C3E50"  # Fondo general
-COLOR_PANEL     = "#34495E"  # Paneles / contenedores
-COLOR_TEXT      = "#ECF0F1"  # Texto
-COLOR_PRIMARY   = "#3498DB"  # Botones principales
-COLOR_ACCENT    = "#1ABC9C"  # Botón activo / hover
-COLOR_BORDER    = "#22313F"  # Borde tenue
+PALETTE = BRAND_PALETTE  # paleta centralizada: {"bg","panel","text","primary","accent","border",...}
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATE_PATH = os.path.join(BASE_DIR, "app_state.json")
@@ -34,14 +30,14 @@ class App(tk.Tk):
         self.title("Sistema de Gestión")
         self.geometry("1000x650")
         self.minsize(900, 560)
-        self.configure(bg=COLOR_BG)
+        self.configure(bg=PALETTE["bg"])
         centrar_ventana(self, 1000, 650)
 
         # Intentar establecer ícono (opcional)
         self._set_icon()
 
-        # Aplicar ajustes globales ttk (tema oscuro base)
-        self._apply_ttk_dark_theme()
+        # Aplicar tema ttk unificado (colores / estilos por marca)
+        self._style = apply_brand_ttk_theme(self)
 
         # Estado UI
         self._botones_menu: dict[str, tk.Button] = {}
@@ -57,59 +53,22 @@ class App(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self._confirmar_salida)
 
         # Cargar vista inicial -> última usada o "Inicio"
-        last = self._leer_estado().get("last_view") or "Inicio"
+        last = (self._leer_estado().get("last_view") or "Inicio")
         self._activar_y_cargar(last, self._resolver_loader(last), persist=False)
 
     # -------------------------------------------------------
-    # Ttk Theme (oscuro base para toda la app)
+    # Icono de la ventana
     # -------------------------------------------------------
-    def _apply_ttk_dark_theme(self):
-        style = ttk.Style(self)
-        try:
-            style.theme_use("default")
-        except Exception:
-            pass
-
-        # Colores generales
-        style.configure(".", background=COLOR_BG, foreground=COLOR_TEXT)
-        style.configure("TFrame", background=COLOR_BG)
-        style.configure("TNotebook", background=COLOR_BG, borderwidth=0)
-        style.configure("TNotebook.Tab", background=COLOR_PANEL, foreground=COLOR_TEXT)
-        style.map("TNotebook.Tab", background=[("selected", COLOR_BG)])
-
-        # Botones ttk (si se usan)
-        style.configure("TButton", background=COLOR_PRIMARY, foreground=COLOR_TEXT, borderwidth=0)
-        style.map("TButton", background=[("active", COLOR_ACCENT)])
-
-        # Entradas ttk
-        style.configure("TEntry", fieldbackground="#3B4A5A", foreground=COLOR_TEXT)
-        style.configure("TCombobox",
-                        fieldbackground="#3B4A5A", background=COLOR_PANEL, foreground=COLOR_TEXT)
-        style.map("TCombobox",
-                  fieldbackground=[("readonly", "#3B4A5A")],
-                  foreground=[("readonly", COLOR_TEXT)],
-                  background=[("readonly", COLOR_PANEL)])
-
-        # Treeview base (los módulos usan su propio estilo 'Dark.Treeview')
-        style.configure("Treeview",
-            background=COLOR_PANEL, fieldbackground=COLOR_PANEL,
-            foreground=COLOR_TEXT, rowheight=22
-        )
-
     def _set_icon(self):
         try:
-            # .ico en Windows; .png como fallback en *nix
             ico = os.path.join(BASE_DIR, "assets", "icon.ico")
             png = os.path.join(BASE_DIR, "assets", "logo.png")
             if os.path.exists(ico):
                 self.iconbitmap(default=ico)
             elif os.path.exists(png):
-                try:
-                    img = tk.PhotoImage(file=png)
-                    self.iconphoto(True, img)
-                    self._icon_img_ref = img  # mantener referencia
-                except Exception:
-                    pass
+                img = tk.PhotoImage(file=png)
+                self.iconphoto(True, img)
+                self._icon_img_ref = img  # mantener referencia
         except Exception:
             pass
 
@@ -118,77 +77,71 @@ class App(tk.Tk):
     # -------------------------------------------------------
     def _crear_widgets(self):
         # Navbar superior
-        self.navbar = tk.Frame(self, bg=COLOR_BG, highlightthickness=0, bd=0)
+        self.navbar = tk.Frame(self, bg=PALETTE["bg"], highlightthickness=0, bd=0)
         self.navbar.grid(row=0, column=0, sticky="nsew")
 
         self._boton_specs = [
-            ("Inicio", self.cargar_inicio, "Alt+0"),
-            ("Productos", self.cargar_productos, "Alt+1"),
-            ("Inventario", self.cargar_inventario, "Alt+2"),
-            ("Ventas", self.cargar_ventas, "Alt+3"),
-            ("Créditos", self.cargar_creditos, "Alt+4"),
-            ("Mermas", self.cargar_mermas, "Alt+5"),
-            ("Gastos", self.cargar_gastos, "Alt+6"),
-            ("Reportes", self.cargar_reportes, "Alt+7"),
+            ("Inicio",     self.cargar_inicio,    "Alt+0"),
+            ("Productos",  self.cargar_productos, "Alt+1"),
+            ("Inventario", self.cargar_inventario,"Alt+2"),
+            ("Ventas",     self.cargar_ventas,    "Alt+3"),
+            ("Créditos",   self.cargar_creditos,  "Alt+4"),
+            ("Mermas",     self.cargar_mermas,    "Alt+5"),
+            ("Gastos",     self.cargar_gastos,    "Alt+6"),
+            ("Reportes",   self.cargar_reportes,  "Alt+7"),
         ]
 
-        # Columnas de la navbar con pesos iguales (+1 para respaldo)
+        # Columnas de la navbar con pesos iguales (+1 para botón de respaldo)
         total_cols = len(self._boton_specs) + 1
         for c in range(total_cols):
             self.navbar.grid_columnconfigure(c, weight=1, uniform="nav")
 
         # Crear botones
         for idx, (texto, comando, _atajo) in enumerate(self._boton_specs):
-            b = self._nav_button(
-                self.navbar,
-                label=texto,
-                command=lambda c=comando, ref=texto: self._activar_y_cargar(ref, c)
-            )
+            b = self._nav_button(self.navbar, label=texto, command=lambda c=comando, ref=texto: self._activar_y_cargar(ref, c))
             b.grid(row=0, column=idx, sticky="nsew", padx=6, pady=8)
             self._botones_menu[texto] = b
 
-        # Botón de respaldo BD (última columna) — etiqueta sin "(Ctrl+B)"
-        self.btn_backup = self._nav_button(
-            self.navbar, label="Respaldar BD", command=self._respaldar_bd
-        )
+        # Botón de respaldo BD (última columna)
+        self.btn_backup = self._nav_button(self.navbar, label="Respaldar BD", command=self._respaldar_bd)
         self.btn_backup.grid(row=0, column=total_cols - 1, sticky="nsew", padx=(6, 12), pady=8)
 
         # Contenedor principal (los módulos insertan su propio frame dentro)
-        self.contenido_frame = tk.Frame(self, bg=COLOR_PANEL, highlightthickness=0, bd=0)
+        self.contenido_frame = tk.Frame(self, bg=PALETTE["panel"], highlightthickness=0, bd=0)
         self.contenido_frame.grid(row=1, column=0, sticky="nsew")
         self.contenido_frame.grid_rowconfigure(0, weight=1)
         self.contenido_frame.grid_columnconfigure(0, weight=1)
 
         # Status bar
-        status_frame = tk.Frame(self, bg=COLOR_PANEL, highlightthickness=0, bd=0)
+        status_frame = tk.Frame(self, bg=PALETTE["panel"], highlightthickness=0, bd=0)
         status_frame.grid(row=2, column=0, sticky="ew")
         self.status_var = tk.StringVar(value="Listo.")
         self.status_label = tk.Label(
             status_frame, textvariable=self.status_var,
             anchor="w", padx=10, pady=6,
-            bg=COLOR_PANEL, fg=COLOR_TEXT
+            bg=PALETTE["panel"], fg=PALETTE["text"]
         )
         self.status_label.pack(fill="x")
 
     def _nav_button(self, parent, label, command):
         btn = tk.Button(
             parent, text=label, command=command,
-            bg=COLOR_PRIMARY, fg=COLOR_TEXT,
-            activebackground=COLOR_ACCENT, activeforeground=COLOR_TEXT,
+            bg=PALETTE["primary"], fg=PALETTE["text"],
+            activebackground=PALETTE["accent"], activeforeground=PALETTE["text"],
             relief="raised", bd=1,
             padx=12, pady=8, cursor="hand2",
-            highlightthickness=1, highlightbackground=COLOR_BORDER, highlightcolor=COLOR_ACCENT
+            highlightthickness=1, highlightbackground=PALETTE["border"], highlightcolor=PALETTE["accent"],
         )
 
         def _on_enter(_):
             if self._boton_activo and self._botones_menu.get(self._boton_activo) is btn:
                 return
-            btn.configure(bg=COLOR_ACCENT)
+            btn.configure(bg=PALETTE["accent"])
 
         def _on_leave(_):
             if self._boton_activo and self._botones_menu.get(self._boton_activo) is btn:
                 return
-            btn.configure(bg=COLOR_PRIMARY)
+            btn.configure(bg=PALETTE["primary"])
 
         btn.bind("<Enter>", _on_enter)
         btn.bind("<Leave>", _on_leave)
@@ -196,21 +149,20 @@ class App(tk.Tk):
 
     def _configurar_atajos_teclado(self):
         # Navegación rápida (Alt+N)
-        self.bind_all("<Alt-Key-0>", lambda e: self._activar_y_cargar("Inicio", self.cargar_inicio))
-        self.bind_all("<Alt-Key-1>", lambda e: self._activar_y_cargar("Productos", self.cargar_productos))
-        self.bind_all("<Alt-Key-2>", lambda e: self._activar_y_cargar("Inventario", self.cargar_inventario))
-        self.bind_all("<Alt-Key-3>", lambda e: self._activar_y_cargar("Ventas", self.cargar_ventas))
-        self.bind_all("<Alt-Key-4>", lambda e: self._activar_y_cargar("Créditos", self.cargar_creditos))
-        self.bind_all("<Alt-Key-5>", lambda e: self._activar_y_cargar("Mermas", self.cargar_mermas))
-        self.bind_all("<Alt-Key-6>", lambda e: self._activar_y_cargar("Gastos", self.cargar_gastos))
-        self.bind_all("<Alt-Key-7>", lambda e: self._activar_y_cargar("Reportes", self.cargar_reportes))
+        self.bind_all("<Alt-Key-0>", lambda _e: self._activar_y_cargar("Inicio", self.cargar_inicio))
+        self.bind_all("<Alt-Key-1>", lambda _e: self._activar_y_cargar("Productos", self.cargar_productos))
+        self.bind_all("<Alt-Key-2>", lambda _e: self._activar_y_cargar("Inventario", self.cargar_inventario))
+        self.bind_all("<Alt-Key-3>", lambda _e: self._activar_y_cargar("Ventas", self.cargar_ventas))
+        self.bind_all("<Alt-Key-4>", lambda _e: self._activar_y_cargar("Créditos", self.cargar_creditos))
+        self.bind_all("<Alt-Key-5>", lambda _e: self._activar_y_cargar("Mermas", self.cargar_mermas))
+        self.bind_all("<Alt-Key-6>", lambda _e: self._activar_y_cargar("Gastos", self.cargar_gastos))
+        self.bind_all("<Alt-Key-7>", lambda _e: self._activar_y_cargar("Reportes", self.cargar_reportes))
 
         # Utilitarios
-        # (La combinación Ctrl+B sigue funcionando, aunque ya no se muestra en el botón)
-        self.bind_all("<Control-b>", lambda e: self._respaldar_bd())
-        self.bind_all("<F5>", lambda e: self._recargar_vista_activa())
-        self.bind_all("<F11>", lambda e: self._toggle_fullscreen(True))
-        self.bind_all("<Escape>", lambda e: self._toggle_fullscreen(False))
+        self.bind_all("<Control-b>", lambda _e: self._respaldar_bd())  # backup
+        self.bind_all("<F5>",        lambda _e: self._recargar_vista_activa())
+        self.bind_all("<F11>",       lambda _e: self._toggle_fullscreen(True))
+        self.bind_all("<Escape>",    lambda _e: self._toggle_fullscreen(False))
 
     # -------------------------------------------------------
     # Barra de estado
@@ -226,17 +178,16 @@ class App(tk.Tk):
         # Reset de botones
         for nombre, btn in self._botones_menu.items():
             if nombre == nombre_boton:
-                btn.config(bg=COLOR_ACCENT, relief="sunken")
+                btn.config(bg=PALETTE["accent"], relief="sunken")
             else:
-                btn.config(bg=COLOR_PRIMARY, relief="raised")
+                btn.config(bg=PALETTE["primary"], relief="raised")
         self._boton_activo = nombre_boton
 
         # Cargar vista
         self.set_status(f"Cargando módulo: {nombre_boton}…")
         self.limpiar_contenido()
         try:
-            # Cada módulo es responsable de su layout (monta y hace pack)
-            cargar_callback()
+            cargar_callback()  # cada módulo gestiona su layout
             self.set_status(f"Módulo activo: {nombre_boton}")
             if persist:
                 self._guardar_estado({"last_view": nombre_boton})
@@ -252,18 +203,18 @@ class App(tk.Tk):
                 pass
 
     # -------------------------------------------------------
-    # Resuelve el callback a partir del nombre (para estado persistente)
+    # Resolver callback desde el nombre (persistencia)
     # -------------------------------------------------------
     def _resolver_loader(self, nombre: str):
         mapping = {
-            "Inicio": self.cargar_inicio,
-            "Productos": self.cargar_productos,
+            "Inicio":     self.cargar_inicio,
+            "Productos":  self.cargar_productos,
             "Inventario": self.cargar_inventario,
-            "Ventas": self.cargar_ventas,
-            "Créditos": self.cargar_creditos,
-            "Mermas": self.cargar_mermas,
-            "Gastos": self.cargar_gastos,
-            "Reportes": self.cargar_reportes,
+            "Ventas":     self.cargar_ventas,
+            "Créditos":   self.cargar_creditos,
+            "Mermas":     self.cargar_mermas,
+            "Gastos":     self.cargar_gastos,
+            "Reportes":   self.cargar_reportes,
         }
         return mapping.get(nombre, self.cargar_inicio)
 
@@ -306,7 +257,7 @@ class App(tk.Tk):
         try:
             self.btn_backup.config(state="disabled")
 
-            # Carpeta sugerida por defecto (Documentos o HOME)
+            # Carpeta sugerida (Documentos o HOME)
             home_dir = os.path.expanduser("~")
             docs_dir = os.path.join(home_dir, "Documents")
             initial_dir = docs_dir if os.path.isdir(docs_dir) else home_dir
@@ -324,8 +275,10 @@ class App(tk.Tk):
             destino = os.path.join(destino_dir, filename)
 
             self.set_status("Creando respaldo de BD…")
-            with get_connection() as src_conn:
-                # Usar backup nativo de SQLite
+            # Usar backup nativo de SQLite
+            # Nota: get_connection() ya aplica PRAGMA foreign_keys=ON en la app.
+            from db.database import get_connection as _gc  # import local para evitar ciclos
+            with _gc() as src_conn:
                 with sqlite3.connect(destino) as dst_conn:
                     src_conn.backup(dst_conn)
 
@@ -398,7 +351,7 @@ class App(tk.Tk):
     # -------------------------------------------------------
     # Ventana / ciclo
     # -------------------------------------------------------
-    def _confirmar_salida(self, event=None):
+    def _confirmar_salida(self, _event=None):
         """Confirma salida evitando errores si la app ya se está destruyendo."""
         if self._closing:
             return

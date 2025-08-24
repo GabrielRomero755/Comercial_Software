@@ -30,3 +30,295 @@ Gastos (CRUD Empleados y Clientes + asociación en gastos)
 Tema visual y nueva identidad
 
 Paleta beige/rosa/café en toda la app y sustitución de assets.
+
+
+
+# Correcciones y puntos débiles (estado actual)
+
+**General / arquitectura**
+
+* `main.py`: falta `import sys` (se usa en `_abrir_carpeta`).
+* Estilos `Dark.Treeview`, validadores y lógica de ordenamiento duplicados en varios módulos → conviene **centralizarlos** (menos bugs y mantenimiento).
+* Orden de fechas: cada módulo parsea/ordena con formatos distintos → definir **formato canónico** y un **único parser/helper**.
+* Montos y cantidades en `float` en varias rutas (riesgo de redondeo) → ideal migrar a **Decimal/NUMERIC(10,2)**.
+* Verificar que `get_connection()` active `PRAGMA foreign_keys=ON` (integridad referencial).
+* Faltan **índices** en búsquedas frecuentes (por fecha y FKs), lo que podría degradar el rendimiento con datos grandes.
+
+**Inventario**
+
+* Enlazar movimientos con gastos/entradas por texto/fecha es frágil si en algún lugar se hace (no visible completo) → preferible **FKs explícitas** (evita ambigüedades).
+
+**Ventas**
+
+* Lógica actual acepta **kilos/cajas/unidades** y en algunos flujos los kilos afectan cajas (equivalencia por `peso_caja`) y/o ambas entradas influyen en el total → **confuso** y propenso a errores de cálculo.
+* No hay **post-venta** (cancelar/modificar) ni auditoría.
+* No hay **tickets** (PDF/térmico).
+
+**Reportes**
+
+* Créditos: los **pagos** de clientes no se registran de forma **individual** (se infiere por diferencia), limitando trazabilidad/auditoría.
+* Exportación PDF depende de ReportLab (manejado con shim) → correcto, pero conviene **documentarlo** como opcional.
+
+**Gastos**
+
+* No existe **CRUD de empleados** (para salarios) ni CRUD de clientes **dentro** del módulo (si se quiere operar sin salir).
+* No hay **cuentas por pagar a proveedores** (CXP) integradas.
+
+---
+
+# Cambios y mejoras solicitadas (integrados al plan)
+
+## Módulo de Ventas
+
+* **Desvinculación de Cajas en el cálculo**
+
+  * El **total de la venta** siempre se calcula como:
+
+    * **Por kilos**: `kilos * precio` (manual/mayoreo/menudeo).
+    * **Por unidades**: `unidades * precio` (para productos que se venden por pieza).
+  * **`num_cajas` y `peso_caja`** se **mantienen** en BD y UI **solo como información de stock** (referencial/promedio).
+  * Si el usuario ingresa **kilos** y también **número de cajas** en el formulario, **las cajas no influyen en el total**.
+  * Por defecto, **no** se ajustará `num_cajas` automáticamente al vender por kilos (para evitar “consumo de cajas equivalentes”). El control de cajas se hace en **entradas** y **mermas**. *(Opcional configurable más adelante: “descontar cajas al vender por kilos”)*
+
+* **Mantener venta por Unidades**
+
+  * La modalidad por **unidades** sigue operando para productos que se venden por pieza, sin cambios de negocio.
+
+* **Gestión post-venta**
+
+  * **Cancelar venta** (soft-delete): `ventas.estado (activa/cancelada)`, `fecha_cancelacion`, `motivo_cancelacion`.
+
+    * Efecto: **revertir inventario** (kilos/unidades según el caso) y **revertir deuda** si fue a crédito (registrar un movimiento de ajuste o pago inverso).
+  * **Modificar venta**: edición controlada (kilos/unidades/precio/tipo), aplicando **ajuste diferencial** sobre stock y crédito.
+  * **Auditoría**: `ventas_eventos` (quién, cuándo, qué cambió).
+
+* **Generación de tickets**
+
+  * Ticket con: **“Ajos La Misión”**, **ID de la venta**, **líneas de productos**, **total de kilos/unidades**, **total por producto**, **total de la venta**.
+  * Soporte **PDF** y **impresión térmica** (58/80mm).
+  * “Imprimir al guardar” y reimpresión desde el listado.
+
+## Módulo de Inventario
+
+* **Registro de Proveedores (CRUD completo)**
+
+  * Nueva tabla **`proveedores`** con: `id (auto)`, `nombre`, `telefono`.
+  * ABM (Alta/Baja/Modificación) desde una vista propia y selección en Entradas.
+
+* **Compras a Crédito (CXP)**
+
+  * **`compras`**: (producto\_id, proveedor\_id, kilos/num\_cajas/unidades, precio, total, tipo\_pago: contado/credito, saldo, fecha).
+  * **`pagos_proveedor`**: (proveedor\_id, compra\_id opcional, monto, fecha, nota).
+  * Flujo:
+
+    * **Contado**: impacta stock y, si se desea, gasto directo.
+    * **Crédito**: impacta stock y **genera deuda** con proveedor; los **pagos** reducen `saldo`.
+  * Relacionar explícitamente Entradas con proveedor y, si corresponde, con la compra.
+
+## Módulo de Reportes
+
+* **Reporte de deudas a proveedores (nuevo)**
+
+  * Por proveedor: **compras a crédito** (detalle), **pagos** (detalle), **saldo por compra** y **saldo total**.
+  * Filtros por rango y proveedor. Exportar CSV/PDF.
+
+* **Reporte de deudas de clientes (mejorado)**
+
+  * Agregar **dirección** del cliente.
+  * Mostrar **productos** comprados (detalle por venta).
+  * Registrar y listar **pagos individuales** del cliente (con fecha y monto), y calcular estatus con base real, no por diferencia.
+
+* **Análisis de ventas**
+
+  * **Por producto (ranking completo)**: del **más vendido al menos** vendido.
+
+    * Métricas sugeridas: kilos/unidades vendidas, **importe**, **ticket promedio** por producto, **rotación** (ventas/días activos), **participación (%)** sobre el total, **tendencia** vs. período anterior, **margen** (si añadimos costo).
+  * **General**: ventas totales por día/semana/mes, con: importe, kilos, número de tickets, ticket promedio, **clientes atendidos** (si aplica), comparativos YoY/MoM.
+  * Gráficas (barras/líneas), exportación CSV/PDF.
+
+## Módulo de Gastos
+
+* **Gestión de salarios y clientes (con CRUD)**
+
+  * Nueva tabla **`empleados`** (CRUD completo) para vincular **gasto tipo “salario”** a un empleado.
+  * Posibilidad de asociar un **gasto a un cliente** (por ejemplo, devoluciones/logística) y contar con **CRUD de clientes dentro del módulo** (o acceso directo) para no salir del flujo.
+  * `gastos` se amplía con `empleado_id` y `cliente_id` (opcionales).
+  * Filtros/reportes por empleado/cliente.
+
+## Frontend y diseño
+
+* **Nueva paleta (beige/rosa/café, etc.)**
+
+  * Crear **`ui/theme.py`** con paleta y estilos ttk/win nativos unificados; migrar todos los módulos a este tema.
+* **Cambio de identidad visual**
+
+  * Reemplazar **logo/ícono/eslogan** en app y reportes/tickets por la identidad final de la bodega.
+
+---
+
+# Ajustes técnicos y de modelo de datos (propuestos)
+
+**Nuevas tablas**
+
+* `proveedores(id INTEGER PK, nombre TEXT, telefono TEXT)`
+* `compras(id, producto_id FK, proveedor_id FK, kilos REAL, num_cajas REAL, unidades INT, precio NUMERIC(10,2), total NUMERIC(10,2), tipo_pago TEXT CHECK('contado'|'credito'), saldo NUMERIC(10,2), fecha TEXT ISO)`
+* `pagos_proveedor(id, proveedor_id FK, compra_id FK NULL, monto NUMERIC(10,2), fecha TEXT ISO, nota TEXT)`
+* `pagos_cliente(id, cliente_id FK, venta_id FK NULL, monto NUMERIC(10,2), fecha TEXT ISO, nota TEXT)`
+* `empleados(id, nombre TEXT, puesto TEXT NULL, telefono TEXT NULL, email TEXT NULL, activo INT DEFAULT 1)`
+* `ventas_eventos(id, venta_id FK, accion TEXT, detalle_json TEXT, usuario TEXT NULL, fecha TEXT ISO)`
+
+**Columnas nuevas / cambios**
+
+* `ventas`: `estado TEXT DEFAULT 'activa'`, `fecha_cancelacion TEXT NULL`, `motivo_cancelacion TEXT NULL`
+* `clientes`: `direccion TEXT`
+* `gastos`: `empleado_id INT NULL`, `cliente_id INT NULL` *(y, si se quiere trazabilidad de CXP: `proveedor_id`, `compra_id` opcionales)*
+* **Importante (Ventas)**: mantener **unidades**, **num\_cajas** y **peso\_caja** en productos, pero **el total no usa num\_cajas/peso\_caja**.
+
+  * Por defecto **no** se actualiza `num_cajas` al vender por kilos (se gestiona en entradas/mermas).
+
+**Índices sugeridos**
+
+* Índices por FK: `ventas(producto_id, cliente_id)`, `compras(producto_id, proveedor_id)`, `pagos_cliente(cliente_id)`, `pagos_proveedor(proveedor_id)`
+* Índices de fecha: `ventas(fecha)`, `compras(fecha)`, `gastos(fecha)`
+* Índices por nombre para búsquedas: `productos(nombre)`, `clientes(nombre)`, `proveedores(nombre)`
+
+**Política monetaria**
+
+* Montos/costos/precios en **NUMERIC(10,2)** y cálculos internos con **Decimal** (ya hay helpers; reforzar uso antes de `INSERT/UPDATE`).
+
+**Transacciones**
+
+* En venta/compra/pago/cancelación: **una sola transacción** que actualice stock, saldos y asientos; rollback en error.
+
+**Integridad**
+
+* `PRAGMA foreign_keys=ON` al abrir conexión.
+* Evitar JOINs frágiles por texto y usar **FKs explícitas** entre inventario, compras, gastos, ventas y pagos.
+
+---
+
+# Cambios en UI/Flujo por módulo
+
+**Ventas**
+
+* Formulario: **Producto**, **Kilos** (o **Unidades**, según el caso), **Precio** (manual/mayoreo/menudeo), **Tipo** (contado/crédito), **Cliente** (si crédito).
+* Campo **Cajas**: **se quita del cálculo**; puede mostrarse como **dato informativo** del producto (no editable en la venta).
+* Al guardar: opción **“Imprimir ticket”** y/o botón de reimpresión en el listado.
+* Listado: agregar **Estado** (activa/cancelada) y menú contextual: **Cancelar**, **Modificar**, **Reimprimir**.
+
+**Inventario**
+
+* Vista **Proveedores (CRUD)**: tabla + formulario.
+* **Entradas**: seleccionar proveedor y tipo de compra; si **crédito**, crear registro en `compras` con `saldo=total`.
+* **Pagos a proveedor**: UI simple (monto, fecha, nota) con efecto en `saldo`.
+
+**Reportes**
+
+* **Deudas a Proveedores**: por proveedor → compras (detalle), pagos (detalle), saldo por compra y saldo total.
+* **Deudas de Clientes**: dirección del cliente, detalle de productos por venta, **pagos individuales**.
+* **Análisis de Ventas**:
+
+  * **Por producto** (ranking completo): kilos/unidades, importe, participación %, ticket promedio por producto, rotación, tendencia vs. período anterior, (opcional) margen.
+  * **General**: ventas por periodo (día/semana/mes), importe/kilos, #tickets, ticket promedio, clientes atendidos, comparativos.
+  * Gráficas + exportación.
+
+**Gastos**
+
+* **CRUD Empleados** dentro del módulo y selección al registrar **salario**.
+* **CRUD Clientes** accesible desde Gastos (toplevel rápido o pestaña secundaria) para poder asociar gastos a clientes sin salir.
+* Filtros por empleado/cliente.
+
+**Frontend / tema**
+
+* `ui/theme.py` con paleta beige/rosa/café y estilos base (Treeview, Combobox, Buttons, Check/Radios, Headings).
+* Reemplazo de **assets** (logo/ícono) y encabezados de reportes/tickets con **Ajos La Misión**.
+
+**Ticket (contenido)**
+
+* **Encabezado**: “Ajos La Misión”.
+* **Venta ID**.
+* **Detalle**: producto(s), **kilos o unidades** por línea, **total por producto**.
+* **Totales**: total de kilos/unidades (suma), **total de la venta**.
+* Fecha/hora y (opcional) forma de pago, leyenda o gracias.
+
+---
+
+# Roadmap sugerido (orden óptimo)
+
+1. **Modelo de datos + migraciones**
+
+   * Crear tablas nuevas, columnas, índices y activar FK.
+   * Ajustar helpers para Decimal/NUMERIC.
+
+2. **Inventario + Proveedores + CXP**
+
+   * CRUD de proveedores, compras (contado/crédito) y pagos a proveedor.
+   * Entradas enlazadas.
+
+3. **Ventas (cálculo solo por kilos o por unidades) + Post-venta + Tickets**
+
+   * Remover influencia de cajas en el **cálculo** (y dejar cajas como dato informativo).
+   * Cancelar/modificar ventas con auditoría.
+   * Generar e imprimir tickets (PDF/térmico).
+
+4. **Pagos de Clientes + Reporte de Deudas de Clientes (mejorado)**
+
+   * Registrar pagos individuales, agregar dirección y detalle de productos.
+
+5. **Reporte de Deudas a Proveedores + Análisis de Ventas (ranking completo y general)**
+
+   * Métricas y comparativos, exportación.
+
+6. **Gastos (CRUD Empleados y Clientes + asociación en gastos)**
+
+7. **Tema visual y nueva identidad**
+
+   * Paleta beige/rosa/café en toda la app y sustitución de assets.
+Ese es el plan de mejoras que quiero implementar, si has estado reaizando las modificaciones?
+
+
+SISTEMA_COMERCIO
+|-assets
+|---icon.ic
+|---logo.png
+|-backups
+|-db
+|--migrations
+|----0001_add_clientes _direccion.sql
+|----0002_create_empleados.sql
+|----0003_create_proveedores_y_compras.sql
+|----0004_create_pagos_proveedor.sql
+|----0005_alter_ventas_postventa_enforce_kilos_unidades_xor.sql
+|----0006_create_ventas_eventos.sql
+|----0007_alter_gastos_add_empleado_y_cliente.sql
+|----0008_create_view_pagos_cliente.sql
+|----0009_add_extra_indexes.sql
+|----0010_recompute_deudas_clientes_y_proveedores.sql
+|---__init__.py
+|---database.py
+|---init_db.sql
+|---schema.sql
+|-modules
+|---__init__.py
+|---calendar_widget.py
+|---creditos.py
+|---gastos.py
+|---home.py
+|---inventario.py
+|---mermas.py
+|---productos.py
+|---reportes.py
+|---ventas.py
+|-ui
+|---__init__.py
+|---helpers.py
+|---theme.py
+|---tickets.py
+|-main.py
+
+database.py
+helpers.py
+theme.py
+ventas.py
+tickets.py
+reportes.py

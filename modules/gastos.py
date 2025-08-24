@@ -1,28 +1,25 @@
 # modules/gastos.py
 # -----------------------------------------------------------
-# Gestión de Gastos
+# Sistema de Comercio — Módulo de Gastos
 #
 # Funcionalidad:
-#   - Catálogo de tipos de gasto (CRUD: alta desde modal simple).
-#   - Registro de gastos: tipo, monto, descripción, fecha (auto u opcional manual).
+#   - Catálogo de tipos de gasto (alta simple desde modal).
+#   - Registro de gastos: tipo, monto, descripción, fecha (auto u opcional).
 #   - Asociación opcional a Empleado y/o Cliente (si el esquema lo soporta).
-#   - Búsqueda dinámica (tipo/descripcion/empleado/cliente).
+#   - Búsqueda dinámica (tipo/descr./empleado/cliente).
 #   - Edición y eliminación de gastos.
 #   - Listado con monto formateado y ordenamiento por encabezados.
 #
-# Mejoras UX:
-#   - Validador de 2 decimales (admite coma o punto).
-#   - Calendario en modo LIBRE (todas las fechas activas).
-#   - ESC cierra ventanas emergentes; ENTER confirma acciones.
-#   - Supr elimina seleccionado; doble clic edita.
-#   - Reglas: si tipo == 'Salarios' -> empleado requerido.
+# UX:
+#   - Validador 2 decimales (coma/punto), calendario libre, ESC cierra/ENTER confirma.
+#   - Supr elimina seleccionado, doble clic edita.
+#   - Regla: si tipo == 'Salarios' -> empleado requerido.
 #
-# Integración con BD (opcional según migraciones):
-#   - Tabla empleados(id, nombre, telefono).
+# Integración dinámica con BD (según migraciones):
+#   - Tabla empleados(id, nombre, telefono ...).
 #   - gastos.empleado_id  (NULL) → empleados.id
 #   - gastos.cliente_id   (NULL) → clientes.id
-#   - Si columnas/tablas no existen, los controles se ocultan y el módulo
-#     funciona en modo básico.
+#   - Si columnas/tablas no existen, la UI se oculta y el módulo opera en modo básico.
 # -----------------------------------------------------------
 
 from __future__ import annotations
@@ -30,70 +27,67 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk, messagebox
 from typing import Optional
+from datetime import datetime
 
 from db.database import get_connection
 from modules.calendar_widget import CalendarioWidget
-from ui.helpers import to_float, formato_moneda, es_fecha_ok, normalizar_fecha
+from ui.helpers import (
+    to_float,
+    formato_moneda,
+    es_fecha_ok,
+    normalizar_fecha,
+    adjuntar_validador_2_decimales,
+)
+from ui.theme import (
+    apply_brand_ttk_theme,
+    stylize_combobox_dropdown,
+    set_treeview_stripes,
+    BRAND_PALETTE,
+)
 
-# Tema centralizado
-try:
-    from ui.theme import THEME
-except Exception:
-    THEME = {}
-
-COLOR_BG        = THEME.get("bg", "#2C3E50")
-COLOR_PANEL     = THEME.get("panel", "#34495E")
-COLOR_TEXT      = THEME.get("text", "#ECF0F1")
-COLOR_PRIMARY   = THEME.get("primary", "#3498DB")
-COLOR_SUCCESS   = THEME.get("success", "#2ECC71")
-COLOR_DANGER    = THEME.get("danger", "#E74C3C")
-COLOR_ENTRY_BG  = THEME.get("entry_bg", "#3B4A5A")
-COLOR_ENTRY_FG  = THEME.get("entry_fg", COLOR_TEXT)
-COLOR_SEL_BG    = THEME.get("selection", "#1ABC9C")
-COLOR_BORDER    = THEME.get("border", "#22313F")
+PALETTE = BRAND_PALETTE
 
 
 class GastosFrame(tk.Frame):
-    # Flags dinámicos (según esquema)
+    # Flags de esquema (dinámicos)
     _has_empleados: bool = False
     _gastos_has_empleado_fk: bool = False
     _gastos_has_cliente_fk: bool = False
 
     def __init__(self, master=None):
-        super().__init__(master, bg=COLOR_BG)
+        super().__init__(master, bg=PALETTE["bg"])
 
-        # Layout raíz (grid)
-        # 0=form, 1=busqueda, 2=tabla, 3=acciones
+        # Tema / estilos unificados
+        self._style = apply_brand_ttk_theme(self)
+        self._tree_style_name = "Brand.Treeview"
+
+        # Layout raíz (grid): 0=form, 1=busqueda, 2=tabla, 3=acciones
         self.grid_rowconfigure(0, weight=0)
         self.grid_rowconfigure(1, weight=0)
         self.grid_rowconfigure(2, weight=1)
         self.grid_rowconfigure(3, weight=0)
         self.grid_columnconfigure(0, weight=1)
 
-        self._style = ttk.Style()
-        self._aplicar_tema_ttk()
+        # Detectar esquema y construir UI
         self._detectar_esquema()
+        self._build_ui()
 
-        self.crear_interfaz()
-        self.cargar_tipos_gasto()
+        # Carga de catálogos y listado
+        self._cargar_tipos_gasto()
         self._cargar_empleados()
         self._cargar_clientes()
         self.cargar_gastos()
 
-        # Atajos generales del frame
+        # Atajos generales
         try:
-            # Enter registra desde cualquier campo del formulario principal
             for w in (self.tipo_combo, self.monto_entry, self.descripcion_entry, self.fecha_entry):
-                w.bind("<Return>", lambda e: self.registrar_gasto())
+                w.bind("<Return>", lambda _: self.registrar_gasto())
             if self._empleado_combo is not None:
-                self._empleado_combo.bind("<Return>", lambda e: self.registrar_gasto())
+                self._empleado_combo.bind("<Return>", lambda _: self.registrar_gasto())
             if self._cliente_combo is not None:
-                self._cliente_combo.bind("<Return>", lambda e: self.registrar_gasto())
-
-            # Supr elimina en la tabla
-            self.tree.bind("<Delete>", lambda e: self.eliminar_gasto())
-            # Doble clic edita
-            self.tree.bind("<Double-1>", lambda e: self.editar_gasto())
+                self._cliente_combo.bind("<Return>", lambda _: self.registrar_gasto())
+            self.tree.bind("<Delete>", lambda _: self.eliminar_gasto())
+            self.tree.bind("<Double-1>", lambda _: self.editar_gasto())
         except Exception:
             pass
 
@@ -105,9 +99,9 @@ class GastosFrame(tk.Frame):
         try:
             with get_connection() as conn:
                 # Tabla empleados
-                r = conn.execute("""
-                    SELECT 1 FROM sqlite_master WHERE type='table' AND name='empleados' LIMIT 1
-                """).fetchone()
+                r = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='empleados' LIMIT 1"
+                ).fetchone()
                 self._has_empleados = bool(r)
 
                 # Columnas opcionales en gastos
@@ -120,131 +114,87 @@ class GastosFrame(tk.Frame):
             self._gastos_has_cliente_fk = False
 
     # -------------------------------------------------------
-    # Estilos
+    # UI helpers (¡sin pack implícito!)
     # -------------------------------------------------------
-    def _aplicar_tema_ttk(self):
-        try:
-            self._style.theme_use("default")
-        except Exception:
-            pass
-
-        # Treeview oscuro
-        self._style.configure(
-            "Dark.Treeview",
-            background=COLOR_PANEL,
-            fieldbackground=COLOR_PANEL,
-            foreground=COLOR_TEXT,
-            rowheight=24,
-            bordercolor=COLOR_BORDER,
-            lightcolor=COLOR_BORDER,
-            darkcolor=COLOR_BORDER,
-        )
-        self._style.map(
-            "Dark.Treeview",
-            background=[("selected", COLOR_SEL_BG)],
-            foreground=[("selected", COLOR_TEXT)],
-        )
-        self._style.configure(
-            "Dark.Treeview.Heading",
-            background=COLOR_PANEL,
-            foreground=COLOR_TEXT,
-            relief="flat"
-        )
-        self._style.map("Dark.Treeview.Heading", background=[("active", COLOR_PRIMARY)])
-
-        # Combobox oscuro
-        self._style.configure(
-            "Dark.TCombobox",
-            fieldbackground=COLOR_ENTRY_BG,
-            background=COLOR_PANEL,
-            foreground=COLOR_TEXT,
-            arrowsize=14
-        )
-        self._style.map(
-            "Dark.TCombobox",
-            fieldbackground=[("readonly", COLOR_ENTRY_BG), ("!readonly", COLOR_ENTRY_BG)],
-            foreground=[("readonly", COLOR_TEXT), ("!readonly", COLOR_TEXT)],
-            background=[("readonly", COLOR_PANEL), ("!readonly", COLOR_PANEL)],
-            arrowcolor=[("readonly", COLOR_TEXT), ("!readonly", COLOR_TEXT)],
-        )
-
     def _panel(self, parent):
-        return tk.Frame(parent, bg=COLOR_PANEL, bd=0, highlightthickness=0)
+        """Crea un contenedor sin gestionar geometría (el llamador usa grid)."""
+        return tk.Frame(parent, bg=PALETTE["panel"], bd=0, highlightthickness=0)
 
     def _lbl(self, parent, text, **grid):
-        w = tk.Label(parent, text=text, bg=parent["bg"], fg=COLOR_TEXT)
+        w = tk.Label(parent, text=text, bg=parent["bg"], fg=PALETTE["text"])
         if grid:
             w.grid(**grid)
         return w
 
     def _entry(self, parent, width=16, **grid):
-        e = tk.Entry(parent, width=width, bg=COLOR_ENTRY_BG, fg=COLOR_ENTRY_FG,
-                     insertbackground=COLOR_TEXT, relief="flat",
-                     highlightthickness=1, highlightbackground=COLOR_BORDER, highlightcolor=COLOR_PRIMARY)
+        e = ttk.Entry(parent, width=width, style="TEntry")
         if grid:
             e.grid(**grid)
         return e
 
-    def _btn(self, parent, text, bgc, cmd, **grid):
-        b = tk.Button(parent, text=text, command=cmd,
-                      bg=bgc, fg=COLOR_TEXT, activebackground=bgc,
-                      activeforeground=COLOR_TEXT, relief="flat", padx=10, pady=6, cursor="hand2")
+    def _btn(self, parent, text, style, cmd, **grid):
+        """Crea un botón; el llamador SIEMPRE debe pasar parámetros de grid."""
+        b = ttk.Button(parent, text=text, command=cmd, style=style)
         if grid:
             b.grid(**grid)
         return b
 
-    # ---------------------------
-    # Validadores
-    # ---------------------------
-    @staticmethod
-    def _validate_decimal(proposed: str) -> bool:
-        """
-        Acepta '', '10', '10.', '10.5', '10,5', '10.50', '.5', ',5' con máximo 2 decimales.
-        (Permite ',' o '.' como separador decimal durante la edición).
-        """
-        if proposed == "":
-            return True
-        import re
-        s = (proposed or "").strip()
-        if s in (".", ","):
-            return True
-        return re.fullmatch(r"(\d+([.,]\d{0,2})?|[.,]\d{0,2})", s) is not None
+    def _combobox(self, parent, width=24, **grid):
+        cb = ttk.Combobox(parent, state="readonly", width=width, style="TCombobox")
+        if grid:
+            cb.grid(**grid)
+        # Colorear dropdown
+        cb.configure(postcommand=lambda c=cb: stylize_combobox_dropdown(c, PALETTE))
+        return cb
 
-    # -------------------------------------------------------
-    # UI
-    # -------------------------------------------------------
-    def crear_interfaz(self):
-        # ---------- Formulario (fila 0) ----------
-        form_frame = self._panel(self)
-        form_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 4))
-        # columnas internas
-        for c in range(8):
-            form_frame.grid_columnconfigure(c, weight=(1 if c in (1, 3, 5, 7) else 0))
-
-        # Tipo + catálogo
-        self._lbl(form_frame, "Tipo de Gasto:", row=0, column=0, sticky="e", padx=8, pady=6)
-        self.tipo_combo = ttk.Combobox(
-            form_frame, state="readonly", width=28, style="Dark.TCombobox",
-            postcommand=lambda: self._estilizar_combobox_dropdown(self.tipo_combo)
+    def _tree_with_scrolls(self, parent, columnas, height=12):
+        scroll_y = ttk.Scrollbar(parent, orient="vertical", style="Vertical.TScrollbar")
+        scroll_x = ttk.Scrollbar(parent, orient="horizontal", style="Horizontal.TScrollbar")
+        tree = ttk.Treeview(
+            parent,
+            columns=columnas,
+            show="headings",
+            height=height,
+            style=self._tree_style_name,
+            yscrollcommand=scroll_y.set,
+            xscrollcommand=scroll_x.set,
         )
-        self.tipo_combo.grid(row=0, column=1, sticky="we", padx=4, pady=6)
-        self._btn(form_frame, "Añadir tipo", COLOR_PRIMARY, self.abrir_ventana_nuevo_tipo,
-                  row=0, column=2, padx=8, pady=6, sticky="w")
+        parent.grid_rowconfigure(0, weight=1)
+        parent.grid_columnconfigure(0, weight=1)
+        scroll_y.config(command=tree.yview)
+        scroll_x.config(command=tree.xview)
+        tree.grid(row=0, column=0, sticky="nsew")
+        scroll_y.grid(row=0, column=1, sticky="ns")
+        scroll_x.grid(row=1, column=0, sticky="ew")
+        return tree
+
+    # -------------------------------------------------------
+    # Construcción de interfaz
+    # -------------------------------------------------------
+    def _build_ui(self):
+        # ---------- Formulario ----------
+        form = self._panel(self)
+        form.grid(row=0, column=0, sticky="ew", padx=8, pady=8)
+        for c in range(8):
+            form.grid_columnconfigure(c, weight=(1 if c in (1, 3, 5, 7) else 0))
+
+        # Tipo
+        self._lbl(form, "Tipo de Gasto:", row=0, column=0, sticky="e", padx=8, pady=6)
+        self.tipo_combo = self._combobox(form, width=28, row=0, column=1, sticky="we", padx=4, pady=6)
+        self._btn(form, "Añadir tipo", "TButton", self._abrir_modal_nuevo_tipo, row=0, column=2, padx=8, pady=6, sticky="w")
 
         # Monto + Descripción
-        self._lbl(form_frame, "Monto:", row=1, column=0, sticky="e", padx=8, pady=6)
-        vcmd = (self.register(self._validate_decimal), "%P")
-        self.monto_entry = self._entry(form_frame, width=16, row=1, column=1, sticky="we", padx=4, pady=6)
-        self.monto_entry.configure(validate="key", validatecommand=vcmd)
+        self._lbl(form, "Monto:", row=1, column=0, sticky="e", padx=8, pady=6)
+        self.monto_entry = self._entry(form, width=16, row=1, column=1, sticky="we", padx=4, pady=6)
+        adjuntar_validador_2_decimales(self.monto_entry, permitir_vacio=False)
 
-        self._lbl(form_frame, "Descripción (opcional):", row=1, column=2, sticky="e", padx=8, pady=6)
-        self.descripcion_entry = self._entry(form_frame, width=42, row=1, column=3, padx=4, pady=6, sticky="we")
+        self._lbl(form, "Descripción (opcional):", row=1, column=2, sticky="e", padx=8, pady=6)
+        self.descripcion_entry = self._entry(form, width=42, row=1, column=3, padx=4, pady=6, sticky="we")
 
         # Fecha
-        self._lbl(form_frame, "Fecha (YYYY-MM-DD):", row=0, column=3, sticky="e", padx=8, pady=6)
-        self.fecha_entry = self._entry(form_frame, width=14, row=0, column=4, padx=4, pady=6, sticky="w")
-        self._btn(form_frame, "📅", COLOR_PRIMARY, lambda: self._abrir_calendario(self.fecha_entry),
-                  row=0, column=5, padx=4, pady=6, sticky="w")
+        self._lbl(form, "Fecha (YYYY-MM-DD):", row=0, column=3, sticky="e", padx=8, pady=6)
+        self.fecha_entry = self._entry(form, width=14, row=0, column=4, padx=4, pady=6, sticky="w")
+        self._btn(form, "📅", "TButton", lambda: self._abrir_calendario(self.fecha_entry), row=0, column=5, padx=4, pady=6, sticky="w")
 
         # Empleado (opcional / requerido si tipo == Salarios)
         self._empleado_combo: Optional[ttk.Combobox] = None
@@ -252,45 +202,30 @@ class GastosFrame(tk.Frame):
 
         col_base = 0
         if self._has_empleados and self._gastos_has_empleado_fk:
-            self._lbl(form_frame, "Empleado:", row=2, column=0, sticky="e", padx=8, pady=6)
-            self._empleado_combo = ttk.Combobox(
-                form_frame, state="readonly", width=28, style="Dark.TCombobox",
-                postcommand=lambda: self._estilizar_combobox_dropdown(self._empleado_combo)
-            )
-            self._empleado_combo.grid(row=2, column=1, sticky="we", padx=4, pady=6)
-            self._btn(form_frame, "Gestionar Empleados", COLOR_PRIMARY, self._abrir_crud_empleados,
-                      row=2, column=2, padx=8, pady=6, sticky="w")
-            col_base = 3  # desplazamos cliente a la derecha
+            self._lbl(form, "Empleado:", row=2, column=0, sticky="e", padx=8, pady=6)
+            self._empleado_combo = self._combobox(form, width=28, row=2, column=1, sticky="we", padx=4, pady=6)
+            self._btn(form, "Gestionar Empleados", "TButton", self._abrir_crud_empleados, row=2, column=2, padx=8, pady=6, sticky="w")
+            col_base = 3  # desplaza cliente a la derecha
 
         # Cliente (opcional)
         if self._gastos_has_cliente_fk:
-            self._lbl(form_frame, "Cliente:", row=2, column=col_base, sticky="e", padx=8, pady=6)
-            self._cliente_combo = ttk.Combobox(
-                form_frame, state="readonly", width=28, style="Dark.TCombobox",
-                postcommand=lambda: self._estilizar_combobox_dropdown(self._cliente_combo)
-            )
-            self._cliente_combo.grid(row=2, column=col_base + 1, sticky="we", padx=4, pady=6)
-            self._btn(form_frame, "Gestionar Clientes", COLOR_PRIMARY, self._abrir_crud_clientes,
-                      row=2, column=col_base + 2, padx=8, pady=6, sticky="w")
+            self._lbl(form, "Cliente:", row=2, column=col_base, sticky="e", padx=8, pady=6)
+            self._cliente_combo = self._combobox(form, width=28, row=2, column=col_base + 1, sticky="we", padx=4, pady=6)
+            self._btn(form, "Gestionar Clientes", "TButton", self._abrir_crud_clientes, row=2, column=col_base + 2, padx=8, pady=6, sticky="w")
 
-        self._btn(form_frame, "Registrar Gasto", COLOR_SUCCESS, self.registrar_gasto,
-                  row=3, column=0, columnspan=8, pady=10)
+        self._btn(form, "Registrar Gasto", "Success.TButton", self.registrar_gasto, row=3, column=0, columnspan=8, pady=10)
 
-        # ---------- Búsqueda (fila 1) ----------
-        search_frame = self._panel(self)
-        search_frame.grid(row=1, column=0, sticky="ew", padx=10, pady=(4, 0))
-        search_frame.grid_columnconfigure(1, weight=1)
+        # ---------- Búsqueda ----------
+        search = self._panel(self)
+        search.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 0))
+        search.grid_columnconfigure(1, weight=1)
+        self._lbl(search, "Buscar (tipo/descr./empleado/cliente):", row=0, column=0, sticky="e", padx=8, pady=6)
+        self.buscar_entry = self._entry(search, width=36, row=0, column=1, padx=4, pady=6, sticky="we")
+        self.buscar_entry.bind("<KeyRelease>", self._on_buscar_changed)
 
-        self._lbl(search_frame, "Buscar (tipo/descr./empleado/cliente):", row=0, column=0, sticky="e", padx=8, pady=6)
-        self.buscar_entry = self._entry(search_frame, width=36, row=0, column=1, padx=4, pady=6, sticky="we")
-        self.buscar_entry.bind("<KeyRelease>", self.filtrar_gastos)
-
-        # ---------- Tabla (fila 2) ----------
-        tabla_panel = self._panel(self)
-        tabla_panel.grid(row=2, column=0, sticky="nsew", padx=10, pady=(6, 6))
-        tabla_panel.grid_rowconfigure(0, weight=1)
-        tabla_panel.grid_columnconfigure(0, weight=1)
-
+        # ---------- Tabla ----------
+        tabla = self._panel(self)
+        tabla.grid(row=2, column=0, sticky="nsew", padx=8, pady=8)
         columnas = ["ID", "Tipo", "Monto", "Descripción", "Fecha"]
         if self._gastos_has_empleado_fk:
             columnas.append("Empleado")
@@ -298,20 +233,10 @@ class GastosFrame(tk.Frame):
             columnas.append("Cliente")
         columnas = tuple(columnas)
 
-        scroll_y = ttk.Scrollbar(tabla_panel, orient="vertical")
-        scroll_x = ttk.Scrollbar(tabla_panel, orient="horizontal")
-
-        self.tree = ttk.Treeview(
-            tabla_panel, columns=columnas, show="headings", style="Dark.Treeview",
-            yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set
-        )
-        scroll_y.config(command=self.tree.yview)
-        scroll_x.config(command=self.tree.xview)
-
-        # Anchuras
+        self.tree = self._tree_with_scrolls(tabla, columnas, height=12)
         widths = {
-            "ID": 70, "Tipo": 160, "Monto": 110, "Descripción": 320, "Fecha": 140,
-            "Empleado": 180, "Cliente": 200
+            "ID": 70, "Tipo": 170, "Monto": 110, "Descripción": 360, "Fecha": 150,
+            "Empleado": 200, "Cliente": 220
         }
         anchors = {
             "ID": "center", "Tipo": "w", "Monto": "e", "Descripción": "w", "Fecha": "center",
@@ -322,74 +247,48 @@ class GastosFrame(tk.Frame):
             self.tree.column(col, width=widths.get(col, 120), anchor=anchors.get(col, "w"),
                              stretch=(col in ("Tipo", "Descripción", "Empleado", "Cliente")))
 
-        self.tree.grid(row=0, column=0, sticky="nsew")
-        scroll_y.grid(row=0, column=1, sticky="ns")
-        scroll_x.grid(row=1, column=0, sticky="ew")
-
         # Ordenamiento por encabezados
         tipos_sort = {"ID": "int", "Tipo": "str", "Monto": "money", "Descripción": "str", "Fecha": "date"}
         if self._gastos_has_empleado_fk:
             tipos_sort["Empleado"] = "str"
         if self._gastos_has_cliente_fk:
             tipos_sort["Cliente"] = "str"
-        self._setup_sorting(tree=self.tree, columnas=columnas, tipos=tipos_sort)
+        self._setup_sorting(self.tree, columnas, tipos_sort)
 
-        # ---------- Acciones (fila 3) ----------
+        # ---------- Acciones ----------
         acciones = self._panel(self)
-        acciones.grid(row=3, column=0, sticky="ew", padx=10, pady=(0, 10))
+        acciones.grid(row=3, column=0, sticky="ew", padx=8, pady=(0, 8))
         for c in range(3):
             acciones.grid_columnconfigure(c, weight=1, uniform="btns")
 
-        self._btn(acciones, "Editar seleccionado", COLOR_PRIMARY, self.editar_gasto,
-                  row=0, column=0, padx=5, pady=4, sticky="ew")
-        self._btn(acciones, "Eliminar seleccionado", COLOR_DANGER, self.eliminar_gasto,
-                  row=0, column=1, padx=5, pady=4, sticky="ew")
-        self._btn(acciones, "Refrescar", COLOR_PRIMARY, self.cargar_gastos,
-                  row=0, column=2, padx=5, pady=4, sticky="ew")
-
-    # ---------- Combobox popdown (colores del desplegable) ----------
-    def _estilizar_combobox_dropdown(self, combobox: ttk.Combobox):
-        """Ajusta colores del Listbox interno del combobox para tema oscuro."""
-        try:
-            popdown = combobox.tk.call("ttk::combobox::PopdownWindow", combobox)
-            lb = combobox.nametowidget(popdown + ".f.l")
-            lb.configure(
-                background=COLOR_PANEL,
-                foreground=COLOR_TEXT,
-                selectbackground=COLOR_SEL_BG,
-                selectforeground=COLOR_TEXT,
-                highlightthickness=0,
-                relief="flat"
-            )
-        except Exception:
-            pass
+        self._btn(acciones, "Editar seleccionado", "TButton", self.editar_gasto, row=0, column=0, padx=5, pady=4, sticky="ew")
+        self._btn(acciones, "Eliminar seleccionado", "Danger.TButton", self.eliminar_gasto, row=0, column=1, padx=5, pady=4, sticky="ew")
+        self._btn(acciones, "Refrescar", "TButton", self.cargar_gastos, row=0, column=2, padx=5, pady=4, sticky="ew")
 
     # -------------------------------------------------------
-    # Calendario
+    # Calendario (modo libre)
     # -------------------------------------------------------
     def _abrir_calendario(self, entry_widget: tk.Entry):
-        """Calendario en modo LIBRE: todas las fechas activas."""
         top = tk.Toplevel(self)
         top.title("Seleccionar fecha")
         try:
-            top.configure(bg=COLOR_BG)
+            top.configure(bg=PALETTE["bg"])
         except Exception:
             pass
-        top.resizable(False, False)
         top.transient(self.winfo_toplevel())
         top.grab_set()
         CalendarioWidget(top, entry_widget, fuentes=("all",))
 
     # -------------------------------------------------------
-    # Catálogos (Tipos / Empleados / Clientes)
+    # Catálogos
     # -------------------------------------------------------
-    def cargar_tipos_gasto(self):
+    def _cargar_tipos_gasto(self):
         try:
             with get_connection() as conn:
                 rows = conn.execute("SELECT nombre FROM tipos_gasto ORDER BY nombre COLLATE NOCASE").fetchall()
-            tipos = [r[0] for r in rows]
-            self.tipo_combo['values'] = tipos
-            if tipos:
+            tipos = [r[0] if isinstance(r, tuple) else r["nombre"] for r in rows]
+            self.tipo_combo["values"] = tipos
+            if tipos and not self.tipo_combo.get():
                 self.tipo_combo.current(0)
         except Exception as e:
             messagebox.showerror("Error", f"No se pudieron cargar los tipos de gasto.\n{e}")
@@ -400,9 +299,9 @@ class GastosFrame(tk.Frame):
         try:
             with get_connection() as conn:
                 rows = conn.execute("SELECT id, nombre FROM empleados ORDER BY nombre COLLATE NOCASE").fetchall()
-            self._empleados_map = {r["nombre"]: r["id"] for r in rows}
+            self._empleados_map = { (r[1] if isinstance(r, tuple) else r["nombre"]) : (r[0] if isinstance(r, tuple) else r["id"]) for r in rows }
             self._empleado_combo["values"] = list(self._empleados_map.keys())
-            if self._empleados_map:
+            if self._empleados_map and not self._empleado_combo.get():
                 self._empleado_combo.current(0)
         except Exception as e:
             messagebox.showerror("Error", f"No se pudieron cargar los empleados.\n{e}")
@@ -413,62 +312,55 @@ class GastosFrame(tk.Frame):
         try:
             with get_connection() as conn:
                 rows = conn.execute("SELECT id, nombre FROM clientes ORDER BY nombre COLLATE NOCASE").fetchall()
-            self._clientes_map = {r["nombre"]: r["id"] for r in rows}
+            self._clientes_map = { (r[1] if isinstance(r, tuple) else r["nombre"]) : (r[0] if isinstance(r, tuple) else r["id"]) for r in rows }
             self._cliente_combo["values"] = list(self._clientes_map.keys())
-            if self._clientes_map:
+            if self._clientes_map and not self._cliente_combo.get():
                 self._cliente_combo.current(0)
         except Exception as e:
             messagebox.showerror("Error", f"No se pudieron cargar los clientes.\n{e}")
 
-    def abrir_ventana_nuevo_tipo(self):
-        """Modal para agregar un nuevo tipo al catálogo (ENTER guarda, ESC cierra)."""
-        ventana = tk.Toplevel(self)
-        ventana.title("Nuevo tipo de gasto")
+    def _abrir_modal_nuevo_tipo(self):
+        """Modal para agregar un nuevo tipo al catálogo."""
+        win = tk.Toplevel(self)
+        win.title("Nuevo tipo de gasto")
         try:
-            ventana.configure(bg=COLOR_BG)
+            win.configure(bg=PALETTE["bg"])
         except Exception:
             pass
-        ventana.transient(self.winfo_toplevel())
-        ventana.grab_set()
-        ventana.bind("<Escape>", lambda e: ventana.destroy())
+        win.transient(self.winfo_toplevel())
+        win.grab_set()
+        win.bind("<Escape>", lambda _: win.destroy())
 
-        tk.Label(ventana, text="Nombre del nuevo tipo:", bg=COLOR_BG, fg=COLOR_TEXT)\
-            .grid(row=0, column=0, padx=10, pady=10, sticky="e")
+        tk.Label(win, text="Nombre del nuevo tipo:", bg=PALETTE["bg"], fg=PALETTE["text"]).grid(row=0, column=0, padx=10, pady=10, sticky="e")
+        ent_tipo = ttk.Entry(win, width=28, style="TEntry")
+        ent_tipo.grid(row=0, column=1, padx=10, pady=10)
+        ent_tipo.focus()
 
-        entry_tipo = tk.Entry(ventana, width=28, bg=COLOR_ENTRY_BG, fg=COLOR_ENTRY_FG,
-                              insertbackground=COLOR_TEXT, relief="flat",
-                              highlightthickness=1, highlightbackground=COLOR_BORDER, highlightcolor=COLOR_PRIMARY)
-        entry_tipo.grid(row=0, column=1, padx=10, pady=10)
-        entry_tipo.focus()
-
-        def guardar_tipo(event=None):
-            nuevo_tipo = entry_tipo.get().strip()
-            if not nuevo_tipo:
-                messagebox.showerror("Error", "El nombre del tipo no puede estar vacío.", parent=ventana)
+        def guardar(_=None):
+            nombre = (ent_tipo.get() or "").strip()
+            if not nombre:
+                messagebox.showerror("Error", "El nombre no puede estar vacío.", parent=win)
                 return
             try:
                 with get_connection() as conn:
-                    conn.execute("INSERT INTO tipos_gasto (nombre) VALUES (?)", (nuevo_tipo,))
-                messagebox.showinfo("Éxito", f"Tipo '{nuevo_tipo}' agregado correctamente.", parent=ventana)
-                self.cargar_tipos_gasto()
-                ventana.destroy()
+                    conn.execute("INSERT INTO tipos_gasto (nombre) VALUES (?)", (nombre,))
+                self._cargar_tipos_gasto()
+                messagebox.showinfo("Éxito", f"Tipo '{nombre}' agregado.", parent=win)
+                win.destroy()
             except Exception as e:
-                messagebox.showerror("Error", f"No se pudo agregar el tipo.\n{e}", parent=ventana)
+                messagebox.showerror("Error", f"No se pudo agregar el tipo.\n{e}", parent=win)
 
-        tk.Button(ventana, text="Guardar", command=guardar_tipo,
-                  bg=COLOR_SUCCESS, fg=COLOR_TEXT, activebackground=COLOR_SUCCESS,
-                  activeforeground=COLOR_TEXT, relief="flat", padx=10, pady=6, cursor="hand2")\
-            .grid(row=1, column=0, columnspan=2, pady=10)
-        ventana.bind("<Return>", guardar_tipo)
+        ttk.Button(win, text="Guardar", command=guardar, style="Success.TButton").grid(row=1, column=0, columnspan=2, pady=10)
+        win.bind("<Return>", guardar)
 
     # -------------------------------------------------------
-    # Registro y listado
+    # Registro / listado
     # -------------------------------------------------------
     def registrar_gasto(self):
-        """Valida y registra un gasto. (ENTER ejecuta este método)"""
-        tipo = self.tipo_combo.get().strip()
-        monto_txt = self.monto_entry.get().strip()
-        descripcion = self.descripcion_entry.get().strip()
+        """Valida y registra un gasto."""
+        tipo = (self.tipo_combo.get() or "").strip()
+        monto_txt = (self.monto_entry.get() or "").strip()
+        descripcion = (self.descripcion_entry.get() or "").strip()
         fecha_txt = (self.fecha_entry.get() or "").strip()
 
         if not tipo:
@@ -480,40 +372,37 @@ class GastosFrame(tk.Frame):
             if monto <= 0:
                 raise ValueError
         except ValueError:
-            messagebox.showerror("Error", "Monto inválido. Ejemplos válidos: 100, 100.50, 1.234,56, $1,234.56")
+            messagebox.showerror("Error", "Monto inválido. Ejemplos: 100, 100.50, 1.234,56, $1,234.56")
             return
 
-        # Empleado requerido si tipo == 'Salarios' (insensible a mayúsculas)
+        # Empleado requerido si tipo == 'Salarios'
         empleado_id = None
-        if (self._has_empleados and self._gastos_has_empleado_fk and self._empleado_combo):
+        if self._has_empleados and self._gastos_has_empleado_fk and self._empleado_combo:
             emp_name = (self._empleado_combo.get() or "").strip()
-            if tipo.lower() in ("salarios", "salario"):
-                if not emp_name or emp_name not in getattr(self, "_empleados_map", {}):
-                    messagebox.showerror("Error", "Para 'Salarios' debes seleccionar un empleado.")
-                    return
+            if tipo.lower() in ("salarios", "salario") and not emp_name:
+                messagebox.showerror("Error", "Para 'Salarios' debes seleccionar un empleado.")
+                return
             if emp_name and emp_name in getattr(self, "_empleados_map", {}):
                 empleado_id = self._empleados_map[emp_name]
 
         cliente_id = None
-        if (self._gastos_has_cliente_fk and self._cliente_combo):
+        if self._gastos_has_cliente_fk and self._cliente_combo:
             cli_name = (self._cliente_combo.get() or "").strip()
             if cli_name and cli_name in getattr(self, "_clientes_map", {}):
                 cliente_id = self._clientes_map[cli_name]
 
+        # Fecha
+        fecha_val = None
+        if fecha_txt:
+            fecha_n = normalizar_fecha(fecha_txt)
+            if not es_fecha_ok(fecha_n):
+                messagebox.showerror("Error", "Fecha inválida. Usa YYYY-MM-DD (o deja vacío).")
+                return
+            fecha_val = f"{fecha_n} 00:00:00"
+
         try:
             with get_connection() as conn:
                 cur = conn.cursor()
-
-                if fecha_txt:
-                    fecha_n = normalizar_fecha(fecha_txt)
-                    if not es_fecha_ok(fecha_n):
-                        messagebox.showerror("Error", "Fecha inválida. Usa formato YYYY-MM-DD (o deja vacío).")
-                        return
-                    fecha_val = fecha_n + " 00:00:00"
-                else:
-                    fecha_val = None  # que la BD ponga default localtime
-
-                # Build dinámico del INSERT según columnas disponibles
                 cols = ["tipo", "monto", "descripcion"]
                 vals = [tipo, float(monto), descripcion]
                 if fecha_val is not None:
@@ -545,41 +434,32 @@ class GastosFrame(tk.Frame):
         try:
             with get_connection() as conn:
                 if self._gastos_has_empleado_fk or self._gastos_has_cliente_fk:
-                    # JOINs opcionales
-                    sql = """
+                    emp_sel = ", e.nombre AS empleado" if self._gastos_has_empleado_fk else ""
+                    cli_sel = ", c.nombre AS cliente" if self._gastos_has_cliente_fk else ""
+                    emp_join = "LEFT JOIN empleados e ON e.id = g.empleado_id" if self._gastos_has_empleado_fk else ""
+                    cli_join = "LEFT JOIN clientes  c ON c.id = g.cliente_id"  if self._gastos_has_cliente_fk else ""
+                    base_sql = f"""
                         SELECT g.id, g.tipo, g.monto, g.descripcion, g.fecha
                                {emp_sel} {cli_sel}
                         FROM gastos g
                         {emp_join} {cli_join}
                     """
-                    emp_sel = ", e.nombre AS empleado" if self._gastos_has_empleado_fk else ""
-                    cli_sel = ", c.nombre AS cliente" if self._gastos_has_cliente_fk else ""
-                    emp_join = "LEFT JOIN empleados e ON e.id = g.empleado_id" if self._gastos_has_empleado_fk else ""
-                    cli_join = "LEFT JOIN clientes  c ON c.id = g.cliente_id"  if self._gastos_has_cliente_fk else ""
-                    sql = sql.format(emp_sel=emp_sel, cli_sel=cli_sel, emp_join=emp_join, cli_join=cli_join)
-
                     if filtro:
                         like = f"%{filtro}%"
-                        extra = []
-                        params = []
-                        # Campos base
-                        extra.append("(g.tipo LIKE ? OR g.descripcion LIKE ?)")
+                        parts, params = [], []
+                        parts.append("(g.tipo LIKE ? OR g.descripcion LIKE ?)")
                         params += [like, like]
-                        # Campos opcionales
                         if self._gastos_has_empleado_fk:
-                            extra.append("(e.nombre LIKE ?)")
+                            parts.append("e.nombre LIKE ?")
                             params.append(like)
                         if self._gastos_has_cliente_fk:
-                            extra.append("(c.nombre LIKE ?)")
+                            parts.append("c.nombre LIKE ?")
                             params.append(like)
-                        sql += f" WHERE {' OR '.join(extra)}"
-                        sql += " ORDER BY g.fecha DESC"
+                        sql = base_sql + f" WHERE {' OR '.join(parts)} ORDER BY g.fecha DESC"
                         rows = conn.execute(sql, tuple(params)).fetchall()
                     else:
-                        sql += " ORDER BY g.fecha DESC"
-                        rows = conn.execute(sql).fetchall()
+                        rows = conn.execute(base_sql + " ORDER BY g.fecha DESC").fetchall()
                 else:
-                    # Modo básico
                     if filtro:
                         like = f"%{filtro}%"
                         rows = conn.execute("""
@@ -596,39 +476,50 @@ class GastosFrame(tk.Frame):
                         """).fetchall()
 
                 for r in rows:
-                    # r es sqlite3.Row con alias opcionales
-                    base_vals = [r["id"], r["tipo"], formato_moneda(r["monto"]), r["descripcion"] or "", r["fecha"]]
+                    # Compatibilidad row_factory (tuple/dict)
+                    rid   = r[0] if isinstance(r, tuple) else r["id"]
+                    tipo  = r[1] if isinstance(r, tuple) else r["tipo"]
+                    monto = r[2] if isinstance(r, tuple) else r["monto"]
+                    descr = r[3] if isinstance(r, tuple) else r["descripcion"]
+                    fecha = r[4] if isinstance(r, tuple) else r["fecha"]
+                    vals = [rid, tipo, formato_moneda(monto), descr or "", fecha]
                     if self._gastos_has_empleado_fk:
-                        base_vals.append(r["empleado"] or "")
+                        emp = (r[5] if isinstance(r, tuple) and len(r) > 5 else (r.get("empleado", "") if not isinstance(r, tuple) else ""))
+                        vals.append(emp or "")
                     if self._gastos_has_cliente_fk:
-                        base_vals.append(r["cliente"] or "")
-                    self.tree.insert("", "end", values=tuple(base_vals))
+                        # índice siguiente (6) si hay empleado; si no, (5)
+                        idx = 6 if self._gastos_has_empleado_fk else 5
+                        cli = (r[idx] if isinstance(r, tuple) and len(r) > idx else (r.get("cliente", "") if not isinstance(r, tuple) else ""))
+                        vals.append(cli or "")
+                    self.tree.insert("", "end", values=tuple(vals))
+
+            set_treeview_stripes(self.tree, even_bg=PALETTE.get("alt_row"), odd_bg=PALETTE.get("panel"))
         except Exception as e:
             messagebox.showerror("Error", f"No se pudieron cargar los gastos.\n{e}")
 
-    def filtrar_gastos(self, event=None):
-        filtro = (self.buscar_entry.get() or "").strip()
-        self.cargar_gastos(filtro)
+    def _on_buscar_changed(self, _e=None):
+        self.cargar_gastos((self.buscar_entry.get() or "").strip())
 
     # -------------------------------------------------------
     # Edición / Eliminación
     # -------------------------------------------------------
-    def _gasto_seleccionado(self):
+    def _gasto_sel(self):
         item = self.tree.focus()
         if not item:
             return None
         vals = self.tree.item(item, "values")
         if not vals:
             return None
-        # vals: (ID, Tipo, MontoFmt, Descripcion, Fecha [, Empleado] [, Cliente])
+        # vals: (ID, Tipo, MontoFmt, Descripción, Fecha [, Empleado] [, Cliente])
         gid = int(vals[0])
         tipo = vals[1]
         monto_fmt = vals[2]
         desc = vals[3]
         fecha = vals[4]
         emp_name = vals[5] if self._gastos_has_empleado_fk else None
-        cli_name = vals[6] if (self._gastos_has_empleado_fk and self._gastos_has_cliente_fk) else (
-            vals[5] if (not self._gastos_has_empleado_fk and self._gastos_has_cliente_fk) else None
+        cli_name = (
+            vals[6] if (self._gastos_has_empleado_fk and self._gastos_has_cliente_fk) else
+            (vals[5] if (not self._gastos_has_empleado_fk and self._gastos_has_cliente_fk) else None)
         )
         try:
             monto = to_float(monto_fmt, permitir_cero=False)
@@ -637,23 +528,23 @@ class GastosFrame(tk.Frame):
         return gid, tipo, monto, desc, fecha, emp_name, cli_name
 
     def eliminar_gasto(self):
-        sel = self._gasto_seleccionado()
+        sel = self._gasto_sel()
         if not sel:
             messagebox.showerror("Error", "Selecciona un gasto de la tabla.")
             return
-        gid, tipo, monto, desc, fecha, *_ = sel
+        gid, tipo, monto, _desc, _fecha, *_ = sel
         if not messagebox.askyesno("Confirmar", f"¿Eliminar el gasto '{tipo}' de {formato_moneda(monto)}?"):
             return
         try:
             with get_connection() as conn:
                 conn.execute("DELETE FROM gastos WHERE id = ?", (gid,))
-            self.cargar_gastos(self.buscar_entry.get().strip())
+            self.cargar_gastos((self.buscar_entry.get() or "").strip())
             messagebox.showinfo("Éxito", "Gasto eliminado.")
         except Exception as e:
             messagebox.showerror("Error", f"No se pudo eliminar el gasto.\n{e}")
 
     def editar_gasto(self):
-        sel = self._gasto_seleccionado()
+        sel = self._gasto_sel()
         if not sel:
             messagebox.showerror("Error", "Selecciona un gasto de la tabla.")
             return
@@ -662,18 +553,16 @@ class GastosFrame(tk.Frame):
         win = tk.Toplevel(self)
         win.title("Editar gasto")
         try:
-            win.configure(bg=COLOR_BG)
+            win.configure(bg=PALETTE["bg"])
         except Exception:
             pass
         win.transient(self.winfo_toplevel())
         win.grab_set()
-        win.bind("<Escape>", lambda e: win.destroy())
+        win.bind("<Escape>", lambda _: win.destroy())
 
         # Tipo
-        tk.Label(win, text="Tipo:", bg=COLOR_BG, fg=COLOR_TEXT).grid(row=0, column=0, padx=10, pady=8, sticky="e")
-        cb_tipo = ttk.Combobox(win, state="readonly", width=28, style="Dark.TCombobox",
-                               postcommand=lambda: self._estilizar_combobox_dropdown(cb_tipo))
-        cb_tipo.grid(row=0, column=1, padx=10, pady=8, sticky="we")
+        tk.Label(win, text="Tipo:", bg=PALETTE["bg"], fg=PALETTE["text"]).grid(row=0, column=0, padx=10, pady=8, sticky="e")
+        cb_tipo = self._combobox(win, width=28, row=0, column=1, padx=10, pady=8, sticky="we")
         cb_tipo["values"] = self.tipo_combo["values"]
         try:
             idx = list(cb_tipo["values"]).index(tipo_act)
@@ -683,45 +572,33 @@ class GastosFrame(tk.Frame):
                 cb_tipo.current(0)
 
         # Monto
-        tk.Label(win, text="Monto:", bg=COLOR_BG, fg=COLOR_TEXT).grid(row=1, column=0, padx=10, pady=8, sticky="e")
-        vcmd = (win.register(self._validate_decimal), "%P")
-        ent_monto = tk.Entry(win, width=16, bg=COLOR_ENTRY_BG, fg=COLOR_ENTRY_FG,
-                             insertbackground=COLOR_TEXT, relief="flat",
-                             highlightthickness=1, highlightbackground=COLOR_BORDER, highlightcolor=COLOR_PRIMARY,
-                             validate="key", validatecommand=vcmd)
+        tk.Label(win, text="Monto:", bg=PALETTE["bg"], fg=PALETTE["text"]).grid(row=1, column=0, padx=10, pady=8, sticky="e")
+        ent_monto = ttk.Entry(win, width=16, style="TEntry")
         ent_monto.grid(row=1, column=1, padx=10, pady=8, sticky="w")
         ent_monto.insert(0, f"{monto_act:.2f}")
+        adjuntar_validador_2_decimales(ent_monto, permitir_vacio=False)
 
         # Descripción
-        tk.Label(win, text="Descripción:", bg=COLOR_BG, fg=COLOR_TEXT).grid(row=2, column=0, padx=10, pady=8, sticky="e")
-        ent_desc = tk.Entry(win, width=40, bg=COLOR_ENTRY_BG, fg=COLOR_ENTRY_FG,
-                            insertbackground=COLOR_TEXT, relief="flat",
-                            highlightthickness=1, highlightbackground=COLOR_BORDER, highlightcolor=COLOR_PRIMARY)
+        tk.Label(win, text="Descripción:", bg=PALETTE["bg"], fg=PALETTE["text"]).grid(row=2, column=0, padx=10, pady=8, sticky="e")
+        ent_desc = ttk.Entry(win, width=40, style="TEntry")
         ent_desc.grid(row=2, column=1, padx=10, pady=8, sticky="we")
         ent_desc.insert(0, desc_act or "")
 
         # Fecha
-        tk.Label(win, text="Fecha (YYYY-MM-DD):", bg=COLOR_BG, fg=COLOR_TEXT).grid(row=3, column=0, padx=10, pady=8, sticky="e")
-        ent_fecha = tk.Entry(win, width=16, bg=COLOR_ENTRY_BG, fg=COLOR_ENTRY_FG,
-                             insertbackground=COLOR_TEXT, relief="flat",
-                             highlightthickness=1, highlightbackground=COLOR_BORDER, highlightcolor=COLOR_PRIMARY)
+        tk.Label(win, text="Fecha (YYYY-MM-DD):", bg=PALETTE["bg"], fg=PALETTE["text"]).grid(row=3, column=0, padx=10, pady=8, sticky="e")
+        ent_fecha = ttk.Entry(win, width=16, style="TEntry")
         ent_fecha.grid(row=3, column=1, padx=(10, 0), pady=8, sticky="w")
         ent_fecha.insert(0, normalizar_fecha(fecha_act))
-        tk.Button(win, text="📅", command=lambda: self._abrir_calendario(ent_fecha),
-                  bg=COLOR_PRIMARY, fg=COLOR_TEXT, activebackground=COLOR_PRIMARY,
-                  activeforeground=COLOR_TEXT, relief="flat", padx=8, pady=4, cursor="hand2")\
-            .grid(row=3, column=1, padx=(180, 0), pady=8, sticky="w")
+        ttk.Button(win, text="📅", command=lambda: self._abrir_calendario(ent_fecha), style="TButton").grid(row=3, column=1, padx=(180, 0), pady=8, sticky="w")
 
-        # Empleado / Cliente (si procede)
+        # Empleado / Cliente
         row_next = 4
         cb_emp = None
         cb_cli = None
 
         if self._gastos_has_empleado_fk and self._has_empleados:
-            tk.Label(win, text="Empleado:", bg=COLOR_BG, fg=COLOR_TEXT).grid(row=row_next, column=0, padx=10, pady=8, sticky="e")
-            cb_emp = ttk.Combobox(win, state="readonly", width=28, style="Dark.TCombobox",
-                                  postcommand=lambda: self._estilizar_combobox_dropdown(cb_emp))
-            cb_emp.grid(row=row_next, column=1, padx=10, pady=8, sticky="we")
+            tk.Label(win, text="Empleado:", bg=PALETTE["bg"], fg=PALETTE["text"]).grid(row=row_next, column=0, padx=10, pady=8, sticky="e")
+            cb_emp = self._combobox(win, width=28, row=row_next, column=1, padx=10, pady=8, sticky="we")
             cb_emp["values"] = list(getattr(self, "_empleados_map", {}).keys())
             try:
                 if emp_act and emp_act in getattr(self, "_empleados_map", {}):
@@ -733,10 +610,8 @@ class GastosFrame(tk.Frame):
             row_next += 1
 
         if self._gastos_has_cliente_fk:
-            tk.Label(win, text="Cliente:", bg=COLOR_BG, fg=COLOR_TEXT).grid(row=row_next, column=0, padx=10, pady=8, sticky="e")
-            cb_cli = ttk.Combobox(win, state="readonly", width=28, style="Dark.TCombobox",
-                                  postcommand=lambda: self._estilizar_combobox_dropdown(cb_cli))
-            cb_cli.grid(row=row_next, column=1, padx=10, pady=8, sticky="we")
+            tk.Label(win, text="Cliente:", bg=PALETTE["bg"], fg=PALETTE["text"]).grid(row=row_next, column=0, padx=10, pady=8, sticky="e")
+            cb_cli = self._combobox(win, width=28, row=row_next, column=1, padx=10, pady=8, sticky="we")
             cb_cli["values"] = list(getattr(self, "_clientes_map", {}).keys())
             try:
                 if cli_act and cli_act in getattr(self, "_clientes_map", {}):
@@ -749,11 +624,11 @@ class GastosFrame(tk.Frame):
 
         win.grid_columnconfigure(1, weight=1)
 
-        def guardar(event=None):
-            tipo_new = cb_tipo.get().strip()
-            monto_txt = ent_monto.get().strip()
-            desc_new = ent_desc.get().strip()
-            fecha_txt = ent_fecha.get().strip()
+        def guardar(_=None):
+            tipo_new = (cb_tipo.get() or "").strip()
+            monto_txt = (ent_monto.get() or "").strip()
+            desc_new = (ent_desc.get() or "").strip()
+            fecha_txt = (ent_fecha.get() or "").strip()
             emp_id = None
             cli_id = None
 
@@ -800,16 +675,13 @@ class GastosFrame(tk.Frame):
                     vals.append(gid)
                     cur.execute(sql, tuple(vals))
 
-                self.cargar_gastos(self.buscar_entry.get().strip())
+                self.cargar_gastos((self.buscar_entry.get() or "").strip())
                 messagebox.showinfo("Éxito", "Gasto actualizado.", parent=win)
                 win.destroy()
             except Exception as e:
                 messagebox.showerror("Error", f"No se pudo actualizar el gasto.\n{e}", parent=win)
 
-        tk.Button(win, text="Guardar", command=guardar,
-                  bg=COLOR_SUCCESS, fg=COLOR_TEXT, activebackground=COLOR_SUCCESS,
-                  activeforeground=COLOR_TEXT, relief="flat", padx=10, pady=6, cursor="hand2")\
-            .grid(row=row_next, column=0, columnspan=2, pady=10)
+        ttk.Button(win, text="Guardar", command=guardar, style="Success.TButton").grid(row=row_next, column=0, columnspan=2, pady=8)
         win.bind("<Return>", guardar)
 
     # -------------------------------------------------------
@@ -823,56 +695,43 @@ class GastosFrame(tk.Frame):
         top = tk.Toplevel(self)
         top.title("Empleados")
         try:
-            top.configure(bg=COLOR_BG)
+            top.configure(bg=PALETTE["bg"])
         except Exception:
             pass
         top.transient(self.winfo_toplevel())
         top.grab_set()
-        top.bind("<Escape>", lambda e: top.destroy())
+        top.bind("<Escape>", lambda _: top.destroy())
 
-        # Layout
         for c in range(3):
             top.grid_columnconfigure(c, weight=(1 if c == 1 else 0))
-        # Form
-        tk.Label(top, text="Nombre:", bg=COLOR_BG, fg=COLOR_TEXT).grid(row=0, column=0, padx=8, pady=6, sticky="e")
-        ent_nombre = tk.Entry(top, width=26, bg=COLOR_ENTRY_BG, fg=COLOR_ENTRY_FG,
-                              insertbackground=COLOR_TEXT, relief="flat",
-                              highlightthickness=1, highlightbackground=COLOR_BORDER, highlightcolor=COLOR_PRIMARY)
-        ent_nombre.grid(row=0, column=1, padx=8, pady=6, sticky="we")
 
-        tk.Label(top, text="Teléfono:", bg=COLOR_BG, fg=COLOR_TEXT).grid(row=1, column=0, padx=8, pady=6, sticky="e")
-        ent_tel = tk.Entry(top, width=20, bg=COLOR_ENTRY_BG, fg=COLOR_ENTRY_FG,
-                           insertbackground=COLOR_TEXT, relief="flat",
-                           highlightthickness=1, highlightbackground=COLOR_BORDER, highlightcolor=COLOR_PRIMARY)
-        ent_tel.grid(row=1, column=1, padx=8, pady=6, sticky="we")
+        tk.Label(top, text="Nombre:", bg=PALETTE["bg"], fg=PALETTE["text"]).grid(row=0, column=0, padx=8, pady=6, sticky="e")
+        ent_nombre = ttk.Entry(top, width=26, style="TEntry"); ent_nombre.grid(row=0, column=1, padx=8, pady=6, sticky="we")
 
-        def add_emp(event=None):
-            nombre = ent_nombre.get().strip()
-            tel = ent_tel.get().strip()
+        tk.Label(top, text="Teléfono:", bg=PALETTE["bg"], fg=PALETTE["text"]).grid(row=1, column=0, padx=8, pady=6, sticky="e")
+        ent_tel = ttk.Entry(top, width=20, style="TEntry"); ent_tel.grid(row=1, column=1, padx=8, pady=6, sticky="we")
+
+        def add_emp(_=None):
+            nombre = (ent_nombre.get() or "").strip()
+            tel = (ent_tel.get() or "").strip()
             if not nombre:
                 messagebox.showerror("Error", "El nombre es obligatorio.", parent=top)
                 return
             try:
                 with get_connection() as conn:
                     conn.execute("INSERT INTO empleados (nombre, telefono) VALUES (?, ?)", (nombre, tel))
-                ent_nombre.delete(0, tk.END)
-                ent_tel.delete(0, tk.END)
-                cargar_lista()
-                self._cargar_empleados()
+                ent_nombre.delete(0, tk.END); ent_tel.delete(0, tk.END)
+                cargar_lista(); self._cargar_empleados()
                 messagebox.showinfo("Éxito", "Empleado agregado.", parent=top)
             except Exception as e:
                 messagebox.showerror("Error", f"No se pudo agregar el empleado.\n{e}", parent=top)
 
-        btn_add = tk.Button(top, text="Agregar", command=add_emp,
-                            bg=COLOR_SUCCESS, fg=COLOR_TEXT, activebackground=COLOR_SUCCESS,
-                            activeforeground=COLOR_TEXT, relief="flat", padx=10, pady=6, cursor="hand2")
-        btn_add.grid(row=2, column=0, columnspan=2, padx=8, pady=(4, 8))
+        ttk.Button(top, text="Agregar", command=add_emp, style="Success.TButton").grid(row=2, column=0, columnspan=2, padx=8, pady=(4, 8))
         top.bind("<Return>", add_emp)
 
-        # Tabla
         cols = ("ID", "Nombre", "Teléfono")
-        tree = ttk.Treeview(top, columns=cols, show="headings", style="Dark.Treeview", height=10)
-        for c, w in (("ID", 70), ("Nombre", 200), ("Teléfono", 160)):
+        tree = ttk.Treeview(top, columns=cols, show="headings", style=self._tree_style_name, height=10)
+        for c, w in (("ID", 70), ("Nombre", 220), ("Teléfono", 160)):
             tree.heading(c, text=c)
             tree.column(c, width=w, anchor=("center" if c == "ID" else "w"))
         tree.grid(row=3, column=0, columnspan=3, sticky="nsew", padx=8, pady=(6, 6))
@@ -884,7 +743,11 @@ class GastosFrame(tk.Frame):
                 with get_connection() as conn:
                     rows = conn.execute("SELECT id, nombre, telefono FROM empleados ORDER BY nombre COLLATE NOCASE").fetchall()
                 for r in rows:
-                    tree.insert("", "end", values=(r["id"], r["nombre"], r["telefono"] or ""))
+                    rid  = r[0] if isinstance(r, tuple) else r["id"]
+                    nom  = r[1] if isinstance(r, tuple) else r["nombre"]
+                    tel_ = r[2] if isinstance(r, tuple) else r["telefono"]
+                    tree.insert("", "end", values=(rid, nom, tel_ or ""))
+                set_treeview_stripes(tree, even_bg=PALETTE.get("alt_row"), odd_bg=PALETTE.get("panel"))
             except Exception:
                 pass
 
@@ -894,56 +757,41 @@ class GastosFrame(tk.Frame):
                 messagebox.showerror("Error", "Selecciona un empleado.", parent=top)
                 return
             vals = tree.item(item, "values")
-            emp_id = int(vals[0])
-            nombre = vals[1]
-            tel = vals[2]
+            emp_id = int(vals[0]); nombre = vals[1]; tel = vals[2]
 
             w = tk.Toplevel(top)
             w.title("Editar empleado")
             try:
-                w.configure(bg=COLOR_BG)
+                w.configure(bg=PALETTE["bg"])
             except Exception:
                 pass
-            w.transient(top)
-            w.grab_set()
-            w.bind("<Escape>", lambda e: w.destroy())
+            w.transient(top); w.grab_set()
+            w.bind("<Escape>", lambda _: w.destroy())
 
-            tk.Label(w, text="Nombre:", bg=COLOR_BG, fg=COLOR_TEXT).grid(row=0, column=0, padx=8, pady=6, sticky="e")
-            e_nombre = tk.Entry(w, width=26, bg=COLOR_ENTRY_BG, fg=COLOR_ENTRY_FG,
-                                insertbackground=COLOR_TEXT, relief="flat",
-                                highlightthickness=1, highlightbackground=COLOR_BORDER, highlightcolor=COLOR_PRIMARY)
-            e_nombre.grid(row=0, column=1, padx=8, pady=6, sticky="we")
-            e_nombre.insert(0, nombre)
+            tk.Label(w, text="Nombre:", bg=PALETTE["bg"], fg=PALETTE["text"]).grid(row=0, column=0, padx=8, pady=6, sticky="e")
+            e_nombre = ttk.Entry(w, width=26, style="TEntry"); e_nombre.grid(row=0, column=1, padx=8, pady=6, sticky="we"); e_nombre.insert(0, nombre)
 
-            tk.Label(w, text="Teléfono:", bg=COLOR_BG, fg=COLOR_TEXT).grid(row=1, column=0, padx=8, pady=6, sticky="e")
-            e_tel = tk.Entry(w, width=20, bg=COLOR_ENTRY_BG, fg=COLOR_ENTRY_FG,
-                             insertbackground=COLOR_TEXT, relief="flat",
-                             highlightthickness=1, highlightbackground=COLOR_BORDER, highlightcolor=COLOR_PRIMARY)
-            e_tel.grid(row=1, column=1, padx=8, pady=6, sticky="we")
-            e_tel.insert(0, tel)
+            tk.Label(w, text="Teléfono:", bg=PALETTE["bg"], fg=PALETTE["text"]).grid(row=1, column=0, padx=8, pady=6, sticky="e")
+            e_tel = ttk.Entry(w, width=20, style="TEntry"); e_tel.grid(row=1, column=1, padx=8, pady=6, sticky="we"); e_tel.insert(0, tel)
 
             w.grid_columnconfigure(1, weight=1)
 
-            def save(event=None):
-                n = e_nombre.get().strip()
-                t = e_tel.get().strip()
+            def save(_=None):
+                n = (e_nombre.get() or "").strip()
+                t = (e_tel.get() or "").strip()
                 if not n:
                     messagebox.showerror("Error", "El nombre es obligatorio.", parent=w)
                     return
                 try:
                     with get_connection() as conn:
                         conn.execute("UPDATE empleados SET nombre = ?, telefono = ? WHERE id = ?", (n, t, emp_id))
-                    cargar_lista()
-                    self._cargar_empleados()
+                    cargar_lista(); self._cargar_empleados()
                     messagebox.showinfo("Éxito", "Empleado actualizado.", parent=w)
                     w.destroy()
                 except Exception as e:
                     messagebox.showerror("Error", f"No se pudo actualizar el empleado.\n{e}", parent=w)
 
-            tk.Button(w, text="Guardar", command=save,
-                      bg=COLOR_SUCCESS, fg=COLOR_TEXT, activebackground=COLOR_SUCCESS,
-                      activeforeground=COLOR_TEXT, relief="flat", padx=10, pady=6, cursor="hand2")\
-                .grid(row=2, column=0, columnspan=2, pady=8)
+            ttk.Button(w, text="Guardar", command=save, style="Success.TButton").grid(row=2, column=0, columnspan=2, pady=8)
             w.bind("<Return>", save)
 
         def eliminar():
@@ -952,114 +800,101 @@ class GastosFrame(tk.Frame):
                 messagebox.showerror("Error", "Selecciona un empleado.", parent=top)
                 return
             vals = tree.item(item, "values")
-            emp_id = int(vals[0])
-            nombre = vals[1]
+            emp_id = int(vals[0]); nombre = vals[1]
             if not messagebox.askyesno("Confirmar", f"¿Eliminar empleado '{nombre}'?", parent=top):
                 return
             try:
                 with get_connection() as conn:
-                    # Evitar fallo por FK en gastos
                     cnt = conn.execute("SELECT COUNT(*) FROM gastos WHERE empleado_id = ?", (emp_id,)).fetchone()[0]
                     if cnt > 0:
-                        messagebox.showwarning(
-                            "No permitido",
-                            "No se puede eliminar el empleado porque está referenciado en gastos.",
-                            parent=top
-                        )
+                        messagebox.showwarning("No permitido", "No se puede eliminar: está referenciado en gastos.", parent=top)
                         return
                     conn.execute("DELETE FROM empleados WHERE id = ?", (emp_id,))
-                cargar_lista()
-                self._cargar_empleados()
+                cargar_lista(); self._cargar_empleados()
                 messagebox.showinfo("Éxito", "Empleado eliminado.", parent=top)
             except Exception as e:
                 messagebox.showerror("Error", f"No se pudo eliminar el empleado.\n{e}", parent=top)
 
-        # Botones tabla
-        tk.Button(top, text="Editar", command=editar,
-                  bg=COLOR_PRIMARY, fg=COLOR_TEXT, activebackground=COLOR_PRIMARY,
-                  activeforeground=COLOR_TEXT, relief="flat", padx=10, pady=6, cursor="hand2")\
-            .grid(row=4, column=0, padx=8, pady=(0, 8), sticky="ew")
-        tk.Button(top, text="Eliminar", command=eliminar,
-                  bg=COLOR_DANGER, fg=COLOR_TEXT, activebackground=COLOR_DANGER,
-                  activeforeground=COLOR_TEXT, relief="flat", padx=10, pady=6, cursor="hand2")\
-            .grid(row=4, column=1, padx=8, pady=(0, 8), sticky="ew")
-        tk.Button(top, text="Cerrar", command=top.destroy,
-                  bg=COLOR_PRIMARY, fg=COLOR_TEXT, activebackground=COLOR_PRIMARY,
-                  activeforeground=COLOR_TEXT, relief="flat", padx=10, pady=6, cursor="hand2")\
-            .grid(row=4, column=2, padx=8, pady=(0, 8), sticky="ew")
+        ttk.Button(top, text="Editar", command=editar, style="TButton").grid(row=4, column=0, padx=8, pady=(0, 8), sticky="ew")
+        ttk.Button(top, text="Eliminar", command=eliminar, style="Danger.TButton").grid(row=4, column=1, padx=8, pady=(0, 8), sticky="ew")
+        ttk.Button(top, text="Cerrar", command=top.destroy, style="TButton").grid(row=4, column=2, padx=8, pady=(0, 8), sticky="ew")
 
         cargar_lista()
 
+    # -------------------------------------------------------
+    # CRUD rápido de Clientes
+    # -------------------------------------------------------
     def _abrir_crud_clientes(self):
-        """CRUD rápido y mínimo de clientes dentro del contexto de Gastos."""
         top = tk.Toplevel(self)
         top.title("Clientes")
         try:
-            top.configure(bg=COLOR_BG)
+            top.configure(bg=PALETTE["bg"])
         except Exception:
             pass
         top.transient(self.winfo_toplevel())
         top.grab_set()
-        top.bind("<Escape>", lambda e: top.destroy())
+        top.bind("<Escape>", lambda _: top.destroy())
 
         for c in range(3):
             top.grid_columnconfigure(c, weight=(1 if c == 1 else 0))
 
-        tk.Label(top, text="Nombre:", bg=COLOR_BG, fg=COLOR_TEXT).grid(row=0, column=0, padx=8, pady=6, sticky="e")
-        ent_nombre = tk.Entry(top, width=26, bg=COLOR_ENTRY_BG, fg=COLOR_ENTRY_FG,
-                              insertbackground=COLOR_TEXT, relief="flat",
-                              highlightthickness=1, highlightbackground=COLOR_BORDER, highlightcolor=COLOR_PRIMARY)
-        ent_nombre.grid(row=0, column=1, padx=8, pady=6, sticky="we")
+        tk.Label(top, text="Nombre:", bg=PALETTE["bg"], fg=PALETTE["text"]).grid(row=0, column=0, padx=8, pady=6, sticky="e")
+        ent_nombre = ttk.Entry(top, width=26, style="TEntry"); ent_nombre.grid(row=0, column=1, padx=8, pady=6, sticky="we")
 
-        tk.Label(top, text="Teléfono:", bg=COLOR_BG, fg=COLOR_TEXT).grid(row=1, column=0, padx=8, pady=6, sticky="e")
-        ent_tel = tk.Entry(top, width=20, bg=COLOR_ENTRY_BG, fg=COLOR_ENTRY_FG,
-                           insertbackground=COLOR_TEXT, relief="flat",
-                           highlightthickness=1, highlightbackground=COLOR_BORDER, highlightcolor=COLOR_PRIMARY)
-        ent_tel.grid(row=1, column=1, padx=8, pady=6, sticky="we")
+        tk.Label(top, text="Teléfono:", bg=PALETTE["bg"], fg=PALETTE["text"]).grid(row=1, column=0, padx=8, pady=6, sticky="e")
+        ent_tel = ttk.Entry(top, width=20, style="TEntry"); ent_tel.grid(row=1, column=1, padx=8, pady=6, sticky="we")
 
-        def add_cli(event=None):
-            nombre = ent_nombre.get().strip()
-            tel = ent_tel.get().strip()
+        def add_cli(_=None):
+            nombre = (ent_nombre.get() or "").strip()
+            tel = (ent_tel.get() or "").strip()
             if not nombre:
                 messagebox.showerror("Error", "El nombre es obligatorio.", parent=top)
                 return
             try:
                 with get_connection() as conn:
-                    conn.execute("INSERT INTO clientes (nombre, telefono, deuda_total) VALUES (?, ?, 0.0)", (nombre, tel))
-                ent_nombre.delete(0, tk.END)
-                ent_tel.delete(0, tk.END)
-                cargar_lista()
-                self._cargar_clientes()
+                    conn.execute(
+                        "INSERT INTO clientes (nombre, telefono, deuda_total) VALUES (?, ?, 0.0)",
+                        (nombre, tel),
+                    )
+                ent_nombre.delete(0, tk.END); ent_tel.delete(0, tk.END)
+                cargar_lista(); self._cargar_clientes()
                 messagebox.showinfo("Éxito", "Cliente agregado.", parent=top)
             except Exception as e:
                 messagebox.showerror("Error", f"No se pudo agregar el cliente.\n{e}", parent=top)
 
-        btn_add = tk.Button(top, text="Agregar", command=add_cli,
-                            bg=COLOR_SUCCESS, fg=COLOR_TEXT, activebackground=COLOR_SUCCESS,
-                            activeforeground=COLOR_TEXT, relief="flat", padx=10, pady=6, cursor="hand2")
-        btn_add.grid(row=2, column=0, columnspan=2, padx=8, pady=(4, 8))
+        ttk.Button(top, text="Agregar", command=add_cli, style="Success.TButton").grid(row=2, column=0, columnspan=2, padx=8, pady=(4, 8))
         top.bind("<Return>", add_cli)
 
         cols = ("ID", "Nombre", "Teléfono", "Deuda")
-        tree = ttk.Treeview(top, columns=cols, show="headings", style="Dark.Treeview", height=10)
-        for c, w, a in (("ID", 70, "center"), ("Nombre", 200, "w"), ("Teléfono", 160, "w"), ("Deuda", 110, "e")):
-            tree.heading(c, text=c)
-            tree.column(c, width=w, anchor=a)
+        tree = ttk.Treeview(top, columns=cols, show="headings", style=self._tree_style_name, height=10)
+        for c, w, a in (("ID", 70, "center"), ("Nombre", 220, "w"), ("Teléfono", 160, "w"), ("Deuda", 110, "e")):
+            tree.heading(c, text=c); tree.column(c, width=w, anchor=a)
         tree.grid(row=3, column=0, columnspan=3, sticky="nsew", padx=8, pady=(6, 6))
-        top.grid_rowconfigure(3, weight=1)
 
         def cargar_lista():
+            """Recarga la tabla de clientes (con formateo de deuda)."""
             tree.delete(*tree.get_children())
             try:
                 with get_connection() as conn:
-                    rows = conn.execute("SELECT id, nombre, telefono, deuda_total FROM clientes ORDER BY nombre COLLATE NOCASE").fetchall()
-                from ui.helpers import formato_moneda as _fm
+                    rows = conn.execute(
+                        "SELECT id, nombre, telefono, deuda_total FROM clientes ORDER BY nombre COLLATE NOCASE"
+                    ).fetchall()
                 for r in rows:
-                    tree.insert("", "end", values=(r["id"], r["nombre"], r["telefono"] or "", _fm(r["deuda_total"])))
+                    rid   = r[0] if isinstance(r, tuple) else r["id"]
+                    nom   = r[1] if isinstance(r, tuple) else r["nombre"]
+                    tel_  = r[2] if isinstance(r, tuple) else r["telefono"]
+                    deuda = r[3] if isinstance(r, tuple) else r["deuda_total"]
+                    tree.insert(
+                        "",
+                        "end",
+                        values=(rid, nom, tel_ or "", formato_moneda(deuda or 0)),
+                    )
+                set_treeview_stripes(tree, even_bg=PALETTE.get("alt_row"), odd_bg=PALETTE.get("panel"))
             except Exception:
                 pass
 
         def editar():
+            """Editar cliente seleccionado (nombre/teléfono)."""
             item = tree.focus()
             if not item:
                 messagebox.showerror("Error", "Selecciona un cliente.", parent=top)
@@ -1072,32 +907,28 @@ class GastosFrame(tk.Frame):
             w = tk.Toplevel(top)
             w.title("Editar cliente")
             try:
-                w.configure(bg=COLOR_BG)
+                w.configure(bg=PALETTE["bg"])
             except Exception:
                 pass
             w.transient(top)
             w.grab_set()
-            w.bind("<Escape>", lambda e: w.destroy())
+            w.bind("<Escape>", lambda _: w.destroy())
 
-            tk.Label(w, text="Nombre:", bg=COLOR_BG, fg=COLOR_TEXT).grid(row=0, column=0, padx=8, pady=6, sticky="e")
-            e_nombre = tk.Entry(w, width=26, bg=COLOR_ENTRY_BG, fg=COLOR_ENTRY_FG,
-                                insertbackground=COLOR_TEXT, relief="flat",
-                                highlightthickness=1, highlightbackground=COLOR_BORDER, highlightcolor=COLOR_PRIMARY)
+            tk.Label(w, text="Nombre:", bg=PALETTE["bg"], fg=PALETTE["text"]).grid(row=0, column=0, padx=8, pady=6, sticky="e")
+            e_nombre = ttk.Entry(w, width=26, style="TEntry")
             e_nombre.grid(row=0, column=1, padx=8, pady=6, sticky="we")
             e_nombre.insert(0, nombre)
 
-            tk.Label(w, text="Teléfono:", bg=COLOR_BG, fg=COLOR_TEXT).grid(row=1, column=0, padx=8, pady=6, sticky="e")
-            e_tel = tk.Entry(w, width=20, bg=COLOR_ENTRY_BG, fg=COLOR_ENTRY_FG,
-                             insertbackground=COLOR_TEXT, relief="flat",
-                             highlightthickness=1, highlightbackground=COLOR_BORDER, highlightcolor=COLOR_PRIMARY)
+            tk.Label(w, text="Teléfono:", bg=PALETTE["bg"], fg=PALETTE["text"]).grid(row=1, column=0, padx=8, pady=6, sticky="e")
+            e_tel = ttk.Entry(w, width=20, style="TEntry")
             e_tel.grid(row=1, column=1, padx=8, pady=6, sticky="we")
             e_tel.insert(0, tel)
 
             w.grid_columnconfigure(1, weight=1)
 
-            def save(event=None):
-                n = e_nombre.get().strip()
-                t = e_tel.get().strip()
+            def save(_=None):
+                n = (e_nombre.get() or "").strip()
+                t = (e_tel.get() or "").strip()
                 if not n:
                     messagebox.showerror("Error", "El nombre es obligatorio.", parent=w)
                     return
@@ -1111,13 +942,11 @@ class GastosFrame(tk.Frame):
                 except Exception as e:
                     messagebox.showerror("Error", f"No se pudo actualizar el cliente.\n{e}", parent=w)
 
-            tk.Button(w, text="Guardar", command=save,
-                      bg=COLOR_SUCCESS, fg=COLOR_TEXT, activebackground=COLOR_SUCCESS,
-                      activeforeground=COLOR_TEXT, relief="flat", padx=10, pady=6, cursor="hand2")\
-                .grid(row=2, column=0, columnspan=2, pady=8)
+            ttk.Button(w, text="Guardar", command=save, style="Success.TButton").grid(row=2, column=0, columnspan=2, pady=8)
             w.bind("<Return>", save)
 
         def eliminar():
+            """Eliminar cliente (si no tiene referencias en ventas/pagos/gastos)."""
             item = tree.focus()
             if not item:
                 messagebox.showerror("Error", "Selecciona un cliente.", parent=top)
@@ -1129,19 +958,36 @@ class GastosFrame(tk.Frame):
                 return
             try:
                 with get_connection() as conn:
-                    # Verificar vínculos (ventas, pagos_credito, gastos.cliente_id)
-                    v_ct = conn.execute("SELECT COUNT(*) FROM ventas WHERE cliente_id = ?", (cid,)).fetchone()[0]
-                    p_ct = conn.execute("SELECT COUNT(*) FROM pagos_credito WHERE cliente_id = ?", (cid,)).fetchone()[0]
-                    g_ct = 0
-                    if self._gastos_has_cliente_fk:
-                        g_ct = conn.execute("SELECT COUNT(*) FROM gastos WHERE cliente_id = ?", (cid,)).fetchone()[0]
-                    if (v_ct + p_ct + g_ct) > 0:
+                    # Compatibilidad con distintos esquemas de pagos
+                    refs = 0
+                    try:
+                        refs += conn.execute("SELECT COUNT(*) FROM ventas WHERE cliente_id = ?", (cid,)).fetchone()[0]
+                    except Exception:
+                        pass
+                    # pagos_cliente (nuevo) o pagos_credito (legacy)
+                    try:
+                        refs += conn.execute("SELECT COUNT(*) FROM pagos_cliente WHERE cliente_id = ?", (cid,)).fetchone()[0]
+                    except Exception:
+                        try:
+                            refs += conn.execute("SELECT COUNT(*) FROM pagos_credito WHERE cliente_id = ?", (cid,)).fetchone()[0]
+                        except Exception:
+                            pass
+                    # gastos.cliente_id si la columna existe
+                    try:
+                        cols = {r[1] for r in conn.execute("PRAGMA table_info(gastos)").fetchall()}
+                        if "cliente_id" in cols:
+                            refs += conn.execute("SELECT COUNT(*) FROM gastos WHERE cliente_id = ?", (cid,)).fetchone()[0]
+                    except Exception:
+                        pass
+
+                    if refs > 0:
                         messagebox.showwarning(
                             "No permitido",
-                            "No se puede eliminar el cliente por tener registros asociados.",
-                            parent=top
+                            "No se puede eliminar el cliente: tiene registros asociados.",
+                            parent=top,
                         )
                         return
+
                     conn.execute("DELETE FROM clientes WHERE id = ?", (cid,))
                 cargar_lista()
                 self._cargar_clientes()
@@ -1149,23 +995,14 @@ class GastosFrame(tk.Frame):
             except Exception as e:
                 messagebox.showerror("Error", f"No se pudo eliminar el cliente.\n{e}", parent=top)
 
-        tk.Button(top, text="Editar", command=editar,
-                  bg=COLOR_PRIMARY, fg=COLOR_TEXT, activebackground=COLOR_PRIMARY,
-                  activeforeground=COLOR_TEXT, relief="flat", padx=10, pady=6, cursor="hand2")\
-            .grid(row=4, column=0, padx=8, pady=(0, 8), sticky="ew")
-        tk.Button(top, text="Eliminar", command=eliminar,
-                  bg=COLOR_DANGER, fg=COLOR_TEXT, activebackground=COLOR_DANGER,
-                  activeforeground=COLOR_TEXT, relief="flat", padx=10, pady=6, cursor="hand2")\
-            .grid(row=4, column=1, padx=8, pady=(0, 8), sticky="ew")
-        tk.Button(top, text="Cerrar", command=top.destroy,
-                  bg=COLOR_PRIMARY, fg=COLOR_TEXT, activebackground=COLOR_PRIMARY,
-                  activeforeground=COLOR_TEXT, relief="flat", padx=10, pady=6, cursor="hand2")\
-            .grid(row=4, column=2, padx=8, pady=(0, 8), sticky="ew")
+        ttk.Button(top, text="Editar", command=editar, style="TButton").grid(row=4, column=0, padx=8, pady=(0, 8), sticky="ew")
+        ttk.Button(top, text="Eliminar", command=eliminar, style="Danger.TButton").grid(row=4, column=1, padx=8, pady=(0, 8), sticky="ew")
+        ttk.Button(top, text="Cerrar", command=top.destroy, style="TButton").grid(row=4, column=2, padx=8, pady=(0, 8), sticky="ew")
 
         cargar_lista()
 
     # -------------------------------------------------------
-    # Ordenamiento por columnas
+    # Ordenamiento por columnas (Treeview)
     # -------------------------------------------------------
     def _setup_sorting(self, tree: ttk.Treeview, columnas, tipos):
         """
@@ -1221,12 +1058,15 @@ class GastosFrame(tk.Frame):
             tree.heading(c, text=c, command=lambda cc=c: sort_by(cc))
 
 
+# -----------------------------------------------------------
 # Punto de entrada desde main.py
+# -----------------------------------------------------------
 def mostrar(frame_contenido):
+    """Monta el frame de Gastos en el contenedor principal."""
     for widget in frame_contenido.winfo_children():
         widget.destroy()
     frame = GastosFrame(frame_contenido)
-    # Si main usa grid, esto asegura expansión completa
+    # Compatibilidad: si main usa grid, intentamos grid; si no, pack.
     try:
         frame.grid(row=0, column=0, sticky="nsew")
     except Exception:

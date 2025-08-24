@@ -4,6 +4,9 @@
 #   - get_connection(): conexión con PRAGMAs seguros.
 #   - init_db(): aplica esquema base (schema.sql o init_db.sql) y migraciones.
 #   - run_migrations(): ejecuta db/migrations/*.sql en orden, idempotente.
+#   - Helpers de fechas: db_now(), to_iso(), parse_iso().
+#   - Decimal <-> NUMERIC(10,2): adaptadores/convertidores registrados.
+#   - Utilidades transaccionales: with_tx(), execute_script().
 #   - Helpers: obtener_tablas_existentes(), tabla_existe(), get_db_path().
 #
 # CAMBIOS CLAVE
@@ -13,6 +16,8 @@
 #     * Linux:   ~/.local/share/SistemaComercio/datos_comercio.db
 # - Esquema consolidado en db/schema.sql (si existe). Fallback a db/init_db.sql.
 # - Sistema de migraciones (db/migrations/*.sql) con tabla schema_migrations.
+# - Formato de fecha canónico local: "YYYY-MM-DD HH:MM:SS".
+# - Cálculos monetarios con Decimal y almacenamiento NUMERIC(10,2).
 # -----------------------------------------------------------
 
 from __future__ import annotations
@@ -22,22 +27,102 @@ import sys
 import sqlite3
 import platform
 from pathlib import Path
-from typing import Iterable, List, Set
+from typing import Iterable, Iterator, List, Set
+from contextlib import contextmanager
+from datetime import datetime
+from decimal import Decimal, ROUND_HALF_UP, getcontext
 
-# resource_path desde ui.helpers (compatible con PyInstaller)
+# ===========================================================
+# Decimal: configuración y conversión segura
+# -----------------------------------------------------------
+# Usamos Decimal para evitar problemas de redondeo en dinero.
+# - Escala de 2 decimales con redondeo HALF_UP (estilo contable).
+# - Adaptador: Decimal -> str (para SQLite).
+# - Convertidor: bytes -> Decimal (cuando la columna/alias sea DECIMAL/NUMERIC).
+# ===========================================================
+getcontext().prec = 28  # precisión suficiente para cálculos de negocio
+
+_MONEY_QUANT = Decimal("0.01")
+
+
+def money(value) -> Decimal:
+    """
+    Normaliza un valor a Decimal con 2 decimales (ROUND_HALF_UP).
+    Acepta str/int/float/Decimal.
+    """
+    if value is None:
+        return Decimal("0.00")
+    if isinstance(value, Decimal):
+        q = value
+    else:
+        q = Decimal(str(value))
+    return q.quantize(_MONEY_QUANT, rounding=ROUND_HALF_UP)
+
+
+# Registro de adaptadores/convertidores para sqlite3 (global).
+sqlite3.register_adapter(Decimal, lambda d: str(money(d)))
+
+def _decimal_converter(b: bytes) -> Decimal:
+    s = b.decode("utf-8") if isinstance(b, (bytes, bytearray)) else str(b)
+    if s == "" or s is None:
+        return Decimal("0.00")
+    return money(s)
+
+# Aviso: Para que los convertidores por tipo funcionen, la conexión debe crearse con
+# detect_types = sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES
+sqlite3.register_converter("DECIMAL", _decimal_converter)
+sqlite3.register_converter("NUMERIC", _decimal_converter)
+sqlite3.register_converter("MONEY", _decimal_converter)
+
+# ===========================================================
+# Fechas y formato canónico
+# -----------------------------------------------------------
+# Usaremos siempre hora local en formato ISO "YYYY-MM-DD HH:MM:SS"
+# para escritura/lectura humana consistente en reportes y listados.
+# ===========================================================
+ISO_LOCAL_FMT = "%Y-%m-%d %H:%M:%S"
+
+
+def db_now() -> str:
+    """Fecha/hora local actual en formato canónico."""
+    return datetime.now().strftime(ISO_LOCAL_FMT)
+
+
+def to_iso(dt: datetime | None) -> str:
+    """Convierte un datetime a formato canónico (asume dt en hora local)."""
+    if dt is None:
+        dt = datetime.now()
+    return dt.strftime(ISO_LOCAL_FMT)
+
+
+def parse_iso(s: str | bytes | None) -> datetime | None:
+    """Parsea 'YYYY-MM-DD HH:MM:SS'. Devuelve None si s es vacío/nulo."""
+    if not s:
+        return None
+    if isinstance(s, bytes):
+        s = s.decode("utf-8", errors="ignore")
+    return datetime.strptime(s.strip(), ISO_LOCAL_FMT)
+
+
+# ===========================================================
+# resource_path (compatible con PyInstaller)
+# ===========================================================
 try:
-    from ui.helpers import resource_path
+    from ui.helpers import resource_path  # preferente si existe
 except Exception:
     def resource_path(*relative_parts: str) -> str:
-        base_path = getattr(sys, "_MEIPASS", os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+        base_path = getattr(
+            sys, "_MEIPASS",
+            os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        )
         return os.path.normpath(os.path.join(base_path, *relative_parts))
 
 
-# -----------------------------------------------------------
+# ===========================================================
 # Ubicación de la BD (directorio de datos del usuario)
-# -----------------------------------------------------------
+# ===========================================================
 APP_DIR_NAME = "SistemaComercio"
-DB_FILENAME  = "datos_comercio.db"
+DB_FILENAME = "datos_comercio.db"
 
 
 def _user_data_dir() -> Path:
@@ -49,25 +134,37 @@ def _user_data_dir() -> Path:
         return Path(base) / APP_DIR_NAME
 
 
-DB_DIR  = _user_data_dir()
+DB_DIR = _user_data_dir()
 DB_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = DB_DIR / DB_FILENAME
 
 
-# -----------------------------------------------------------
+def get_db_path() -> Path:
+    """Devuelve la ruta absoluta al archivo de base de datos."""
+    return DB_PATH
+
+
+# ===========================================================
 # Conexión
-# -----------------------------------------------------------
+# ===========================================================
 def get_connection(timeout: float = 10.0) -> sqlite3.Connection:
     """
     Retorna una conexión SQLite con:
       - PRAGMA foreign_keys=ON
       - row_factory=sqlite3.Row
+      - detect_types para convertir DECIMAL/NUMERIC -> Decimal
     """
-    conn = sqlite3.connect(str(DB_PATH), timeout=timeout, detect_types=sqlite3.PARSE_DECLTYPES)
+    conn = sqlite3.connect(
+        str(DB_PATH),
+        timeout=timeout,
+        detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES,
+    )
     conn.row_factory = sqlite3.Row
+
     cur = conn.cursor()
+    # Integridad referencial
     cur.execute("PRAGMA foreign_keys = ON;")
-    # Recomendables; descomenta si deseas:
+    # Rendimiento recomendado (opcional):
     # cur.execute("PRAGMA journal_mode = WAL;")
     # cur.execute("PRAGMA synchronous = NORMAL;")
     # cur.execute("PRAGMA temp_store = MEMORY;")
@@ -76,14 +173,44 @@ def get_connection(timeout: float = 10.0) -> sqlite3.Connection:
     return conn
 
 
-def get_db_path() -> Path:
-    """Devuelve la ruta absoluta al archivo de base de datos."""
-    return DB_PATH
+# ===========================================================
+# Utilidades transaccionales y scripts
+# ===========================================================
+@contextmanager
+def with_tx(conn: sqlite3.Connection) -> Iterator[sqlite3.Cursor]:
+    """
+    Context manager para ejecutar múltiples operaciones en UNA transacción.
+    Uso:
+        with get_connection() as conn:
+            with with_tx(conn) as cur:
+                cur.execute("...")  # múltiples operaciones
+                cur.execute("...")
+    Hace COMMIT al salir sin error; ROLLBACK si hay excepción.
+    """
+    cur = conn.cursor()
+    try:
+        cur.execute("BEGIN;")
+        yield cur
+        cur.execute("COMMIT;")
+    except Exception:
+        try:
+            cur.execute("ROLLBACK;")
+        except Exception:
+            pass
+        raise
+    finally:
+        cur.close()
 
 
-# -----------------------------------------------------------
+def execute_script(conn: sqlite3.Connection, script: str) -> None:
+    """Ejecuta un script SQL completo dentro de una transacción."""
+    with with_tx(conn) as _:
+        conn.executescript(script)
+
+
+# ===========================================================
 # Inicialización y migraciones
-# -----------------------------------------------------------
+# ===========================================================
 def _read_text_file(path: str | Path) -> str:
     with open(path, "r", encoding="utf-8") as f:
         return f.read()
@@ -93,8 +220,8 @@ def _ensure_migrations_table(conn: sqlite3.Connection) -> None:
     conn.execute("""
         CREATE TABLE IF NOT EXISTS schema_migrations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            filename  TEXT UNIQUE NOT NULL,
-            applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+            filename   TEXT UNIQUE NOT NULL,
+            applied_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
         );
     """)
 
@@ -113,9 +240,25 @@ def _discover_migration_files() -> List[Path]:
     mig_dir = Path(resource_path("db", "migrations"))
     if not mig_dir.exists() or not mig_dir.is_dir():
         return []
-    files = [p for p in mig_dir.iterdir() if p.is_file() and p.suffix.lower() == ".sql" and not p.name.startswith(".")]
+    files = [
+        p for p in mig_dir.iterdir()
+        if p.is_file() and p.suffix.lower() == ".sql" and not p.name.startswith(".")
+    ]
     files.sort(key=lambda p: p.name)
     return files
+
+
+def _user_tables(conn: sqlite3.Connection) -> List[str]:
+    """
+    Devuelve tablas de usuario (excluye sqlite_* y schema_migrations).
+    """
+    rows = conn.execute("""
+        SELECT name FROM sqlite_master
+        WHERE type='table'
+          AND name NOT LIKE 'sqlite_%'
+          AND name != 'schema_migrations'
+    """).fetchall()
+    return [r["name"] for r in rows]
 
 
 def _apply_schema_if_needed(conn: sqlite3.Connection) -> None:
@@ -131,33 +274,16 @@ def _apply_schema_if_needed(conn: sqlite3.Connection) -> None:
 
     if schema_path.exists():
         script = _read_text_file(schema_path)
-        _apply_in_tx(conn, script, label="schema.sql")
+        execute_script(conn, script)
+        print("[OK] Aplicado: schema.sql")
     elif legacy_init.exists():
         script = _read_text_file(legacy_init)
-        _apply_in_tx(conn, script, label="init_db.sql (legacy)")
+        execute_script(conn, script)
+        print("[OK] Aplicado: init_db.sql (legacy)")
     else:
-        raise FileNotFoundError("No se encontró db/schema.sql ni db/init_db.sql para inicializar la base.")
-
-
-def _apply_in_tx(conn: sqlite3.Connection, script: str, label: str = "") -> None:
-    """
-    Ejecuta un script SQL completo dentro de una transacción.
-    """
-    cur = conn.cursor()
-    try:
-        cur.execute("BEGIN;")
-        conn.executescript(script)
-        cur.execute("COMMIT;")
-        if label:
-            print(f"[OK] Aplicado: {label}")
-    except Exception:
-        try:
-            cur.execute("ROLLBACK;")
-        except Exception:
-            pass
-        raise
-    finally:
-        cur.close()
+        raise FileNotFoundError(
+            "No se encontró db/schema.sql ni db/init_db.sql para inicializar la base."
+        )
 
 
 def run_migrations(verbose: bool = True) -> None:
@@ -176,24 +302,19 @@ def run_migrations(verbose: bool = True) -> None:
 
         for path in pending:
             script = _read_text_file(path)
-            cur = conn.cursor()
             try:
-                cur.execute("BEGIN;")
-                conn.executescript(script)
-                cur.execute("INSERT INTO schema_migrations (filename) VALUES (?)", (path.name,))
-                cur.execute("COMMIT;")
+                with with_tx(conn) as cur:
+                    conn.executescript(script)
+                    cur.execute(
+                        "INSERT INTO schema_migrations (filename) VALUES (?)",
+                        (path.name,),
+                    )
                 if verbose:
                     print(f"[migrate] OK  {path.name}")
             except Exception as e:
-                try:
-                    cur.execute("ROLLBACK;")
-                except Exception:
-                    pass
                 print(f"[migrate] ERR {path.name}: {e}")
-                # Detenemos para inspección manual si algo falla
+                # Se detiene para inspección manual si algo falla
                 break
-            finally:
-                cur.close()
 
         if pending and verbose:
             print("[DB] Migraciones completadas.")
@@ -227,22 +348,9 @@ def init_db() -> None:
         print(f"[ERROR] Falló la inicialización de la base de datos: {e}")
 
 
-# -----------------------------------------------------------
+# ===========================================================
 # Helpers de inspección
-# -----------------------------------------------------------
-def _user_tables(conn: sqlite3.Connection) -> List[str]:
-    """
-    Devuelve tablas de usuario (excluye sqlite_* y schema_migrations).
-    """
-    rows = conn.execute("""
-        SELECT name FROM sqlite_master
-        WHERE type='table'
-          AND name NOT LIKE 'sqlite_%'
-          AND name != 'schema_migrations'
-    """).fetchall()
-    return [r["name"] for r in rows]
-
-
+# ===========================================================
 def obtener_tablas_existentes() -> List[str]:
     """
     Lista todas las tablas (incluye schema_migrations; excluye sqlite_*).
@@ -260,6 +368,7 @@ def obtener_tablas_existentes() -> List[str]:
 
 
 def tabla_existe(nombre_tabla: str) -> bool:
+    """Indica si existe una tabla con el nombre dado."""
     try:
         with get_connection() as conn:
             row = conn.execute("""

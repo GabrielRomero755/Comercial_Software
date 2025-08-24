@@ -24,11 +24,23 @@
 # - Enter para confirmar también desde el combobox de Producto.
 # - Foco inicial en Producto.
 # - Esc limpia el formulario (kilos/cajas/unidades/motivo) y devuelve el foco.
+# - Montaje compatible con grid o pack desde main.mostrar().
+#
+# TEMA / PALETA
 # -----------------------------------------------------------
+# - Usa el tema de marca unificado (ui.theme) en lugar de colores fijos:
+#     * apply_brand_ttk_theme() para estilos TTK coherentes.
+#     * BRAND_PALETTE para colores (bg, panel, text, primary, accent, etc.).
+#     * set_treeview_stripes() para rayado alterno de filas.
+#     * stylize_combobox_dropdown() para el popup del combobox.
+# -----------------------------------------------------------
+
+from __future__ import annotations
 
 import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import datetime
+
 from db.database import get_connection
 from ui.helpers import (
     redondear_dos_decimales,
@@ -37,28 +49,27 @@ from ui.helpers import (
     to_int,
     adjuntar_validador_2_decimales,
 )
+from ui.theme import (
+    apply_brand_ttk_theme,
+    BRAND_PALETTE,
+    set_treeview_stripes,
+    stylize_combobox_dropdown,
+)
 
-# -----------------------------------------------------------
-# Paleta oscura (consistente con la app)
-# -----------------------------------------------------------
-COLOR_BG        = "#2C3E50"  # Fondo general
-COLOR_PANEL     = "#34495E"  # Paneles / contenedores
-COLOR_TEXT      = "#ECF0F1"  # Texto
-COLOR_PRIMARY   = "#3498DB"  # Botones principales
-COLOR_ENTRY_BG  = "#3B4A5A"  # Entradas
-COLOR_ENTRY_FG  = COLOR_TEXT
-COLOR_BORDER    = "#22313F"
-COLOR_SEL_BG    = "#1ABC9C"  # Selección en tablas/listas
+PALETTE = BRAND_PALETTE
 
 
 class MermasFrame(tk.Frame):
     def __init__(self, master=None):
-        super().__init__(master, bg=COLOR_BG)
-        self.productos = {}  # nombre -> id
+        super().__init__(master, bg=PALETTE["bg"])
+        self.productos: dict[str, int] = {}  # nombre -> id
+        self._producto_seleccionado_id: int | None = None
 
-        self._style = ttk.Style()
-        self._aplicar_tema_ttk()
+        # Tema / estilos
+        self._style = apply_brand_ttk_theme(self)
+        self._tree_style_name = "Brand.Treeview"
 
+        # UI
         self.crear_interfaz()
         self.cargar_productos()
         self.cargar_mermas()
@@ -69,119 +80,54 @@ class MermasFrame(tk.Frame):
         self.after_idle(lambda: self.producto_combo.focus_set())
 
     # ---------------------------
-    # Estilos / helpers UI
+    # Helpers UI (paleta)
     # ---------------------------
-    def _aplicar_tema_ttk(self):
-        try:
-            self._style.theme_use("default")
-        except Exception:
-            pass
-
-        # Treeview oscuro
-        self._style.configure(
-            "Dark.Treeview",
-            background=COLOR_PANEL,
-            fieldbackground=COLOR_PANEL,
-            foreground=COLOR_TEXT,
-            rowheight=24,
-            bordercolor=COLOR_BORDER,
-            lightcolor=COLOR_BORDER,
-            darkcolor=COLOR_BORDER,
-        )
-        self._style.map(
-            "Dark.Treeview",
-            background=[("selected", COLOR_SEL_BG)],
-            foreground=[("selected", COLOR_TEXT)],
-        )
-        self._style.configure(
-            "Dark.Treeview.Heading",
-            background=COLOR_PANEL,
-            foreground=COLOR_TEXT,
-            relief="flat"
-        )
-        self._style.map("Dark.Treeview.Heading",
-                        background=[("active", COLOR_PRIMARY)])
-
-        # Combobox oscuro
-        self._style.configure(
-            "Dark.TCombobox",
-            fieldbackground=COLOR_ENTRY_BG,
-            background=COLOR_PANEL,
-            foreground=COLOR_TEXT,
-            arrowsize=14
-        )
-        self._style.map(
-            "Dark.TCombobox",
-            fieldbackground=[("readonly", COLOR_ENTRY_BG)],
-            foreground=[("readonly", COLOR_TEXT)],
-            background=[("readonly", COLOR_PANEL)],
-            arrowcolor=[("readonly", COLOR_TEXT)],
-        )
-
     def _panel(self, parent, **pack):
-        f = tk.Frame(parent, bg=COLOR_PANEL, bd=0, highlightthickness=0)
+        f = tk.Frame(parent, bg=PALETTE["panel"], bd=0, highlightthickness=0)
         if pack:
             f.pack(**pack)
         return f
 
     def _lbl(self, parent, text, **grid):
-        w = tk.Label(parent, text=text, bg=parent["bg"], fg=COLOR_TEXT)
+        w = tk.Label(parent, text=text, bg=parent["bg"], fg=PALETTE["text"])
         if grid:
             w.grid(**grid)
         return w
 
     def _entry(self, parent, width=12, **grid):
-        e = tk.Entry(parent, width=width, bg=COLOR_ENTRY_BG, fg=COLOR_ENTRY_FG,
-                     insertbackground=COLOR_TEXT, relief="flat",
-                     highlightthickness=1, highlightbackground=COLOR_BORDER, highlightcolor=COLOR_PRIMARY)
+        e = ttk.Entry(parent, width=width, style="TEntry")
         if grid:
             e.grid(**grid)
         return e
 
-    def _btn(self, parent, text, bgc, cmd, **grid):
-        b = tk.Button(parent, text=text, command=cmd,
-                      bg=bgc, fg=COLOR_TEXT, activebackground=bgc,
-                      activeforeground=COLOR_TEXT, relief="flat", padx=10, pady=6, cursor="hand2")
+    def _btn(self, parent, text, style, cmd, **grid):
+        b = ttk.Button(parent, text=text, command=cmd, style=style)
         if grid:
             b.grid(**grid)
         return b
 
-    def _combobox(self, parent, **grid):
-        cb = ttk.Combobox(parent, state="readonly", style="Dark.TCombobox", **grid)
-        cb.configure(postcommand=lambda c=cb: self._estilizar_dropdown(c))
+    def _combobox(self, parent, width=28, **grid):
+        cb = ttk.Combobox(parent, state="readonly", width=width, style="TCombobox")
+        if grid:
+            cb.grid(**grid)
+        cb.configure(postcommand=lambda c=cb: stylize_combobox_dropdown(c, PALETTE))
         return cb
-
-    def _estilizar_dropdown(self, combobox: ttk.Combobox):
-        """Aplica tema oscuro al listbox del desplegable."""
-        try:
-            pop = combobox.tk.call("ttk::combobox::PopdownWindow", combobox)
-            lb = combobox.nametowidget(pop + ".f.l")
-            lb.configure(
-                background=COLOR_PANEL,
-                foreground=COLOR_TEXT,
-                selectbackground=COLOR_SEL_BG,
-                selectforeground=COLOR_TEXT,
-                highlightthickness=0,
-                relief="flat",
-            )
-        except Exception:
-            pass
 
     # ---------------------------
     # UI
     # ---------------------------
     def crear_interfaz(self):
         form_panel = self._panel(self, pady=8, padx=8, fill="x")
-        grid = tk.Frame(form_panel, bg=COLOR_PANEL)
+        grid = tk.Frame(form_panel, bg=PALETTE["panel"])
         grid.pack(fill="x", padx=8, pady=6)
 
         # Producto
         self._lbl(grid, "Producto:", row=0, column=0, sticky="e", padx=4, pady=2)
-        self.producto_combo = self._combobox(grid, width=32)
-        self.producto_combo.grid(row=0, column=1, sticky="we", padx=4, pady=2)  # responsive
-        grid.grid_columnconfigure(1, weight=1)  # la columna del combobox se expande
+        self.producto_combo = self._combobox(grid, width=36)
+        self.producto_combo.grid(row=0, column=1, sticky="we", padx=4, pady=2)
+        grid.grid_columnconfigure(1, weight=1)
         self.producto_combo.bind("<<ComboboxSelected>>", self._on_producto_change)
-        # NUEVO: Enter en el combobox también registra la merma
+        # Enter en combobox también registra la merma
         self.producto_combo.bind("<Return>", lambda e: self.registrar_merma())
 
         # Kilos / Cajas / Unidades
@@ -197,7 +143,7 @@ class MermasFrame(tk.Frame):
         # Motivo
         self._lbl(grid, "Motivo:", row=2, column=0, sticky="e", padx=4, pady=2)
         self.motivo_entry = self._entry(grid, width=48, row=2, column=1, columnspan=5, sticky="we", padx=4, pady=2)
-        grid.grid_columnconfigure(1, weight=1)  # asegura expansión del motivo también
+        grid.grid_columnconfigure(1, weight=1)
 
         # Validadores de 2 decimales (coma/punto) para kilos/cajas
         for e in (self.kilos_entry, self.cajas_entry):
@@ -210,28 +156,30 @@ class MermasFrame(tk.Frame):
         self.motivo_entry.bind("<Return>", lambda e: self.registrar_merma())
 
         # Botón
-        self._btn(grid, "Registrar Merma", COLOR_PRIMARY, self.registrar_merma,
+        self._btn(grid, "Registrar Merma", "TButton", self.registrar_merma,
                   row=3, column=0, columnspan=6, pady=10)
 
         # Info stock / peso
         self.info_label = tk.Label(
             form_panel,
             text="Kilos: 0.00 | Cajas: 0.00 | Unidades: 0 | Peso/caja: 0.00 kg",
-            bg=COLOR_PANEL, fg=COLOR_TEXT, anchor="w"
+            bg=PALETTE["panel"], fg=PALETTE["text"], anchor="w"
         )
         self.info_label.pack(fill="x", padx=16, pady=(0, 6))
 
         # --- Tabla de mermas ---
         tabla_panel = self._panel(self, pady=6, padx=8, fill="both", expand=True)
+        tabla_panel.grid_columnconfigure(0, weight=1)
+        tabla_panel.grid_rowconfigure(0, weight=1)
 
         columnas = ("Producto", "Kilos", "Cajas", "Unidades", "Motivo", "Fecha")
 
         # Scrollbars
-        scroll_y = ttk.Scrollbar(tabla_panel, orient="vertical")
-        scroll_x = ttk.Scrollbar(tabla_panel, orient="horizontal")
+        scroll_y = ttk.Scrollbar(tabla_panel, orient="vertical", style="Vertical.TScrollbar")
+        scroll_x = ttk.Scrollbar(tabla_panel, orient="horizontal", style="Horizontal.TScrollbar")
 
         self.tree = ttk.Treeview(
-            tabla_panel, columns=columnas, show="headings", height=14, style="Dark.Treeview",
+            tabla_panel, columns=columnas, show="headings", height=14, style=self._tree_style_name,
             yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set
         )
         scroll_y.config(command=self.tree.yview)
@@ -248,9 +196,9 @@ class MermasFrame(tk.Frame):
             self.tree.heading(col, text=col)
             self.tree.column(col, width=width, anchor=anchor, stretch=(col in ("Producto", "Motivo")))
 
-        self.tree.pack(fill="both", expand=True, padx=8, pady=(6, 0))
-        scroll_x.pack(fill="x", padx=8, pady=(0, 6))
-        scroll_y.place(relx=1.0, rely=0.0, relheight=1.0, anchor="ne")
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        scroll_y.grid(row=0, column=1, sticky="ns")
+        scroll_x.grid(row=1, column=0, sticky="ew")
 
         # Ordenamiento por encabezados
         self._setup_sorting(
@@ -265,6 +213,277 @@ class MermasFrame(tk.Frame):
                 "Fecha": "date",
             },
         )
+
+    # ---------------------------
+    # Datos / DB
+    # ---------------------------
+    def cargar_productos(self):
+        """Carga productos en el combobox, guardando mapa nombre→id."""
+        try:
+            with get_connection() as conn:
+                rows = conn.execute(
+                    "SELECT id, nombre FROM productos ORDER BY nombre COLLATE NOCASE"
+                ).fetchall()
+            self.productos = {r[1]: int(r[0]) for r in rows}
+            self.producto_combo["values"] = list(self.productos.keys())
+            if self.productos and not self.producto_combo.get():
+                self.producto_combo.current(0)
+                self._on_producto_change()
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudieron cargar los productos.\n{e}")
+
+    def _on_producto_change(self, _e=None):
+        """Actualiza etiqueta info con stock y peso/caja del producto actual."""
+        nombre = (self.producto_combo.get() or "").strip()
+        self._producto_seleccionado_id = self.productos.get(nombre)
+        if not self._producto_seleccionado_id:
+            self.info_label.config(text="Kilos: 0.00 | Cajas: 0.00 | Unidades: 0 | Peso/caja: 0.00 kg")
+            return
+        try:
+            with get_connection() as conn:
+                r = conn.execute(
+                    "SELECT kilos, num_cajas, unidades, peso_caja FROM productos WHERE id = ?",
+                    (self._producto_seleccionado_id,),
+                ).fetchone()
+            if r:
+                kilos = float(r[0] or 0)
+                cajas = float(r[1] or 0)
+                unids = int(r[2] or 0)
+                peso = float(r[3] or 0)
+                self.info_label.config(
+                    text=f"Kilos: {kilos:.2f} | Cajas: {cajas:.2f} | Unidades: {unids} | Peso/caja: {peso:.2f} kg"
+                )
+        except Exception:
+            pass
+
+    def cargar_mermas(self):
+        """Llena la tabla de mermas (más recientes primero)."""
+        try:
+            self.tree.delete(*self.tree.get_children())
+        except Exception:
+            pass
+        try:
+            with get_connection() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT p.nombre AS producto, m.kilos, m.num_cajas, m.unidades, m.motivo, m.fecha
+                      FROM mermas m
+                      JOIN productos p ON p.id = m.producto_id
+                  ORDER BY m.fecha DESC
+                    """
+                ).fetchall()
+            for r in rows:
+                self.tree.insert(
+                    "", "end",
+                    values=(
+                        r[0],  # Producto
+                        f"{redondear_dos_decimales(r[1] or 0):.2f}",
+                        f"{redondear_dos_decimales(r[2] or 0):.2f}",
+                        int(r[3] or 0),
+                        r[4] or "",
+                        formatear_fecha(str(r[5])),
+                    ),
+                )
+            set_treeview_stripes(self.tree, even_bg=PALETTE.get("alt_row"), odd_bg=PALETTE.get("panel"))
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudieron cargar las mermas.\n{e}")
+
+    # ---------------------------
+    # Registro de merma
+    # ---------------------------
+    def registrar_merma(self):
+        """Valida entradas, autocálculo según peso_caja, verifica stock y registra merma."""
+        nombre = (self.producto_combo.get() or "").strip()
+        if not nombre or nombre not in self.productos:
+            messagebox.showerror("Error", "Selecciona un producto.")
+            return
+        producto_id = self.productos[nombre]
+
+        # Leer entradas
+        kilos_txt = (self.kilos_entry.get() or "").strip()
+        cajas_txt = (self.cajas_entry.get() or "").strip()
+        unid_txt  = (self.unidades_entry.get() or "").strip()
+        motivo    = (self.motivo_entry.get() or "").strip()
+
+        try:
+            kilos = to_float(kilos_txt, permitir_cero=True)
+            cajas = to_float(cajas_txt, permitir_cero=True)
+            unidades = to_int(unid_txt, permitir_cero=True)
+        except ValueError:
+            messagebox.showerror("Error", "Valores numéricos inválidos.")
+            return
+
+        if kilos < 0 or cajas < 0 or unidades < 0:
+            messagebox.showerror("Error", "Los valores no pueden ser negativos.")
+            return
+
+        # Leer stock actual y peso/caja
+        try:
+            with get_connection() as conn:
+                r = conn.execute(
+                    "SELECT kilos, num_cajas, unidades, peso_caja FROM productos WHERE id = ?",
+                    (producto_id,),
+                ).fetchone()
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo consultar el producto.\n{e}")
+            return
+
+        if not r:
+            messagebox.showerror("Error", "Producto no encontrado.")
+            return
+
+        kilos_stock, cajas_stock, unid_stock, peso_caja = (
+            float(r[0] or 0),
+            float(r[1] or 0),
+            int(r[2] or 0),
+            float(r[3] or 0),
+        )
+
+        # Autocálculo (si peso_caja > 0)
+        if peso_caja > 0:
+            if kilos > 0 and (cajas == 0):
+                cajas = redondear_dos_decimales(kilos / peso_caja)
+            elif cajas > 0 and (kilos == 0):
+                kilos = redondear_dos_decimales(cajas * peso_caja)
+
+        # Si todo cero, nada que hacer
+        if kilos == 0 and cajas == 0 and unidades == 0:
+            messagebox.showwarning("Atención", "Ingresa al menos uno de: kilos, cajas o unidades.")
+            return
+
+        # Verificar stock suficiente
+        if kilos > kilos_stock + 1e-9:
+            messagebox.showerror("Stock insuficiente", "No hay suficientes kilos.")
+            return
+        if cajas > cajas_stock + 1e-9:
+            messagebox.showerror("Stock insuficiente", "No hay suficientes cajas.")
+            return
+        if unidades > unid_stock:
+            messagebox.showerror("Stock insuficiente", "No hay suficientes unidades.")
+            return
+
+        # Registrar en DB (merma + actualización de producto)
+        try:
+            with get_connection() as conn:
+                cur = conn.cursor()
+                # Insert en mermas
+                cur.execute(
+                    """
+                    INSERT INTO mermas (producto_id, kilos, num_cajas, unidades, motivo, fecha)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        producto_id,
+                        float(kilos),
+                        float(cajas),
+                        int(unidades),
+                        motivo,
+                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    ),
+                )
+                # Update stock producto
+                cur.execute(
+                    """
+                    UPDATE productos
+                       SET kilos = ?, num_cajas = ?, unidades = ?
+                     WHERE id = ?
+                    """,
+                    (
+                        redondear_dos_decimales(kilos_stock - kilos),
+                        redondear_dos_decimales(cajas_stock - cajas),
+                        max(0, int(unid_stock - unidades)),
+                        producto_id,
+                    ),
+                )
+
+            self.cargar_mermas()
+            self._on_producto_change()
+            messagebox.showinfo("Éxito", "Merma registrada correctamente.")
+            self._limpiar_formulario()
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo registrar la merma.\n{e}")
+
+    # ---------------------------
+    # Utilidades
+    # ---------------------------
+    def _limpiar_formulario(self, _e=None):
+        for w in (self.kilos_entry, self.cajas_entry, self.unidades_entry, self.motivo_entry):
+            try:
+                w.delete(0, tk.END)
+            except Exception:
+                pass
+        self.producto_combo.focus_set()
+
+    # ---------------------------
+    # Ordenamiento por columnas
+    # ---------------------------
+    def _setup_sorting(self, tree: ttk.Treeview, columnas, tipos):
+        """
+        Añade ordenamiento por encabezados.
+        tipos: dict nombre_col -> 'int'|'float'|'money'|'date'|'str'
+        """
+        tree._sort_state = {}  # col -> bool(reverse)
+        col_index = {c: i for i, c in enumerate(columnas)}
+
+        def parse_value(col, val):
+            t = tipos.get(col, "str")
+            s = str(val).strip()
+
+            if t == "int":
+                try:
+                    return int(float(s.replace(",", "")))
+                except Exception:
+                    return 0
+            if t == "float":
+                try:
+                    return float(s.replace(",", ""))
+                except Exception:
+                    return 0.0
+            if t == "money":
+                try:
+                    return float(s.replace("$", "").replace(",", ""))
+                except Exception:
+                    return 0.0
+            if t == "date":
+                from datetime import datetime as _dt
+                for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%d/%m/%Y"):
+                    try:
+                        return _dt.strptime(s, fmt)
+                    except Exception:
+                        pass
+                return s
+            return s.lower()
+
+        def sort_by(col):
+            reverse = not tree._sort_state.get(col, False)
+            data = []
+            idx = col_index[col]
+            for iid in tree.get_children(""):
+                vals = tree.item(iid, "values")
+                v = vals[idx] if idx < len(vals) else ""
+                data.append((parse_value(col, v), iid))
+            data.sort(key=lambda x: x[0], reverse=reverse)
+            for n, (_, iid) in enumerate(data):
+                tree.move(iid, "", n)
+            tree._sort_state[col] = reverse
+
+        for c in columnas:
+            tree.heading(c, text=c, command=lambda cc=c: sort_by(cc))
+
+
+# Punto de entrada desde main.py
+def mostrar(frame_contenido):
+    for widget in frame_contenido.winfo_children():
+        try:
+            widget.destroy()
+        except Exception:
+            pass
+    frame = MermasFrame(frame_contenido)
+    # Montaje flexible (grid/pack)
+    try:
+        frame.grid(row=0, column=0, sticky="nsew")
+    except Exception:
+        frame.pack(fill="both", expand=True)
 
     # ---------------------------
     # Datos / selección
@@ -471,6 +690,7 @@ class MermasFrame(tk.Frame):
             s = str(val).strip()
 
             if t == "int":
+                # Tolerante con "5", "5.0" y separadores
                 try:
                     return int(float(s.replace(",", "")))
                 except Exception:
@@ -532,4 +752,8 @@ def mostrar(frame_contenido):
     for widget in frame_contenido.winfo_children():
         widget.destroy()
     frame = MermasFrame(frame_contenido)
-    frame.pack(fill="both", expand=True)
+    # Compatibilidad con grid o pack según cómo esté armado main
+    try:
+        frame.grid(row=0, column=0, sticky="nsew")
+    except Exception:
+        frame.pack(fill="both", expand=True)
