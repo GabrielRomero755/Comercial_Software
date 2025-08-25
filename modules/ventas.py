@@ -560,14 +560,22 @@ class VentasFrame(tk.Frame):
             messagebox.showwarning("Producto", "Selecciona un producto")
             return
 
-        # Modalidad (unidades > cajas > kilos)
+                # Modalidad (UNIDADES o KILOS) — CAJAS es solo referencial (para descontar stock de cajas)
         unidades_txt = self.ent_unidades.get().strip()
         cajas_txt    = self.ent_cajas.get().strip()
         kilos_txt    = self.ent_kilos.get().strip()
 
+        # CAJAS: opcional, solo para restar stock de num_cajas (no afecta total)
+        try:
+            num_cajas_vta = to_float(cajas_txt or 0, permitir_cero=True)
+            if num_cajas_vta < 0:
+                raise ValueError
+        except Exception:
+            messagebox.showerror("Error", "Número de cajas inválido.")
+            return
+
         modalidad = None
         unidades = 0
-        cajas = 0.0
         kilos = 0.0
 
         if unidades_txt:
@@ -582,13 +590,6 @@ class VentasFrame(tk.Frame):
                 messagebox.showerror("Error", "Unidades inválidas (entero positivo).")
                 return
             modalidad = "unidades"
-        elif cajas_txt:
-            try:
-                cajas = to_float(cajas_txt, permitir_cero=False)
-            except ValueError:
-                messagebox.showerror("Error", "Cajas inválidas.")
-                return
-            modalidad = "cajas"
         elif kilos_txt:
             try:
                 kilos = to_float(kilos_txt, permitir_cero=False)
@@ -597,7 +598,8 @@ class VentasFrame(tk.Frame):
                 return
             modalidad = "kilos"
         else:
-            messagebox.showerror("Error", "Ingresa Unidades, Cajas o Kilos para la venta.")
+            # Si solo metieron cajas, NO se permite (total se calcula por kilos o unidades)
+            messagebox.showerror("Error", "Ingresa Kilos o Unidades para registrar la venta.\n(Cajas son solo de control de inventario)")
             return
 
         # Precio
@@ -624,7 +626,7 @@ class VentasFrame(tk.Frame):
                 return
             cliente_id = self.clientes[cli_nombre]
 
-        # Stock y peso_caja
+        # Stock (kilos / unidades / num_cajas) y peso_caja (solo informativo)
         try:
             with get_connection() as conn:
                 cur = conn.cursor()
@@ -637,7 +639,7 @@ class VentasFrame(tk.Frame):
                     if not row:
                         messagebox.showerror("Error", "Producto no encontrado.")
                         return
-                    stock_k, stock_cj, peso_caja, pmay, pmen, stock_u = (
+                    stock_k, stock_cj, _peso_caja, _pmay, _pmen, stock_u = (
                         float(row[0] or 0), float(row[1] or 0), float(row[2] or 0),
                         float(row[3] or 0), float(row[4] or 0), int(row[5] or 0)
                     )
@@ -650,18 +652,13 @@ class VentasFrame(tk.Frame):
                     if not row:
                         messagebox.showerror("Error", "Producto no encontrado.")
                         return
-                    stock_k, stock_cj, peso_caja, pmay, pmen = (
+                    stock_k, stock_cj, _peso_caja, _pmay, _pmen = (
                         float(row[0] or 0), float(row[1] or 0), float(row[2] or 0),
                         float(row[3] or 0), float(row[4] or 0)
                     )
                     stock_u = None
 
-                kilos_vta = 0.0
-                num_cajas_vta = 0.0
-                unidades_vta = 0
-                total = 0.0
-                fecha_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
+                # Validaciones de stock según modalidad
                 if modalidad == "unidades":
                     if stock_u is None:
                         messagebox.showerror("No disponible", "Este producto no admite venta por unidades.")
@@ -669,68 +666,45 @@ class VentasFrame(tk.Frame):
                     if unidades > stock_u:
                         messagebox.showerror("Stock insuficiente", f"Unidades disponibles: {int(stock_u)}")
                         return
-                    unidades_vta = int(unidades)
-                    total = unidades_vta * precio
-
-                    cur.execute("""
-                        INSERT INTO ventas (producto_id, kilos, num_cajas, unidades, precio, total, tipo_venta, cliente_id, fecha{extra_cols})
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?{extra_vals})
-                    """.format(
-                        extra_cols=", estado" if self._ventas_has_estado else "",
-                        extra_vals=", 'ACTIVA'" if self._ventas_has_estado else ""
-                    ), (producto_id, 0.0, 0.0, unidades_vta, float(precio), float(total),
-                        tipo_venta, cliente_id, fecha_str))
-                    cur.execute("UPDATE productos SET unidades = unidades - ? WHERE id = ?",
-                                (unidades_vta, producto_id))
-
-                elif modalidad == "cajas":
-                    # Cajas sólo convierten a kilos (no descuentan num_cajas)
-                    if peso_caja <= 0:
-                        messagebox.showerror("Error", "No se puede vender por cajas sin 'peso_caja'.")
-                        return
-                    kilos_vta = float(redondear_dos_decimales(cajas * peso_caja))
-                    if kilos_vta > stock_k:
-                        messagebox.showerror("Stock insuficiente", f"Kilos disponibles: {redondear_dos_decimales(stock_k)}")
-                        return
-                    num_cajas_vta = float(redondear_dos_decimales(cajas))
-                    total = kilos_vta * precio
-
-                    cur.execute("""
-                        INSERT INTO ventas (producto_id, kilos, num_cajas, unidades, precio, total, tipo_venta, cliente_id, fecha{extra_cols})
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?{extra_vals})
-                    """.format(
-                        extra_cols=", estado" if self._ventas_has_estado else "",
-                        extra_vals=", 'ACTIVA'" if self._ventas_has_estado else ""
-                    ), (producto_id, float(kilos_vta), float(num_cajas_vta), 0, float(precio), float(total),
-                        tipo_venta, cliente_id, fecha_str))
-                    cur.execute("UPDATE productos SET kilos = kilos - ? WHERE id = ?",
-                                (float(kilos_vta), producto_id))
-
                 else:  # kilos
                     if kilos > stock_k:
                         messagebox.showerror("Stock insuficiente", f"Kilos disponibles: {redondear_dos_decimales(stock_k)}")
                         return
-                    kilos_vta = float(redondear_dos_decimales(kilos))
-                    total = kilos_vta * precio
 
-                    cur.execute("""
-                        INSERT INTO ventas (producto_id, kilos, num_cajas, unidades, precio, total, tipo_venta, cliente_id, fecha{extra_cols})
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?{extra_vals})
-                    """.format(
-                        extra_cols=", estado" if self._ventas_has_estado else "",
-                        extra_vals=", 'ACTIVA'" if self._ventas_has_estado else ""
-                    ), (producto_id, float(kilos_vta), 0.0, 0, float(precio), float(total),
-                        tipo_venta, cliente_id, fecha_str))
-                    cur.execute("UPDATE productos SET kilos = kilos - ? WHERE id = ?",
-                                (float(kilos_vta), producto_id))
+                # Si ingresaron cajas, también validar stock de cajas
+                if num_cajas_vta > 0 and num_cajas_vta > stock_cj:
+                    messagebox.showerror("Stock insuficiente", f"Cajas disponibles: {redondear_dos_decimales(stock_cj)}")
+                    return
+
+                # Calcular total (solo por kilos o unidades)
+                kilos_vta = float(redondear_dos_decimales(kilos)) if modalidad == "kilos" else 0.0
+                unidades_vta = int(unidades) if modalidad == "unidades" else 0
+                total = (unidades_vta * precio) if modalidad == "unidades" else (kilos_vta * precio)
+                fecha_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+                # Insertar venta (persistimos num_cajas como referencial)
+                cur.execute("""
+                    INSERT INTO ventas (producto_id, kilos, num_cajas, unidades, precio, total, tipo_venta, cliente_id, fecha{extra_cols})
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?{extra_vals})
+                """.format(
+                    extra_cols=", estado" if self._ventas_has_estado else "",
+                    extra_vals=", 'ACTIVA'" if self._ventas_has_estado else ""
+                ), (producto_id, float(kilos_vta), float(num_cajas_vta), int(unidades_vta), float(precio), float(total),
+                    tipo_venta, cliente_id, fecha_str))
+
+                # Descontar stocks
+                if unidades_vta > 0 and self._productos_has_unidades:
+                    cur.execute("UPDATE productos SET unidades = unidades - ? WHERE id = ?", (unidades_vta, producto_id))
+                if kilos_vta > 0:
+                    cur.execute("UPDATE productos SET kilos = kilos - ? WHERE id = ?", (float(kilos_vta), producto_id))
+                if num_cajas_vta > 0:
+                    cur.execute("UPDATE productos SET num_cajas = num_cajas - ? WHERE id = ?", (float(num_cajas_vta), producto_id))
 
                 # Ajuste deuda cliente (si hay columna)
                 if self._clientes_has_deuda and tipo_venta == "credito" and cliente_id:
                     cur.execute("UPDATE clientes SET deuda_total = deuda_total + ? WHERE id = ?",
                                 (float(total), cliente_id))
-
                 venta_id = cur.lastrowid
-
             messagebox.showinfo("Éxito", "Venta registrada")
             self._clear_form(keep_price=(self.precio_mode.get() != "manual"))
             self._load_sales(self.ent_buscar.get().strip())
@@ -770,30 +744,37 @@ class VentasFrame(tk.Frame):
         if not producto_id:
             messagebox.showerror("Error", "Producto no encontrado."); return
 
-    # Determina modalidad y cantidades igual que _do_sale
+        # Determina modalidad y cantidades (CAJAS es opcional y no convierte)
         unidades_txt = self.ent_unidades.get().strip()
         cajas_txt    = self.ent_cajas.get().strip()
         kilos_txt    = self.ent_kilos.get().strip()
+
         modalidad = None
         unidades = 0
-        cajas = 0.0
         kilos = 0.0
+        num_cajas = 0.0
+
+        # cajas opcionales
+        try:
+            num_cajas = to_float(cajas_txt or 0, permitir_cero=True)
+            if num_cajas < 0:
+                raise ValueError
+        except Exception:
+            messagebox.showerror("Error", "Número de cajas inválido."); return
+
         try:
             if unidades_txt:
                 if not self._productos_has_unidades:
                     messagebox.showerror("No disponible", "La BD no soporta venta por unidades.")
                     return
-                unidades = int(unidades_txt); 
+                unidades = int(unidades_txt)
                 if unidades <= 0: raise ValueError
                 modalidad = "UNIDADES"
-            elif cajas_txt:
-                cajas = to_float(cajas_txt, permitir_cero=False)
-                modalidad = "CAJAS→KILOS"
             elif kilos_txt:
                 kilos = to_float(kilos_txt, permitir_cero=False)
                 modalidad = "KILOS"
             else:
-                messagebox.showerror("Error", "Ingresa Unidades, Cajas o Kilos."); return
+                messagebox.showerror("Error", "Ingresa Unidades o Kilos (las Cajas son opcionales)."); return
         except Exception:
             messagebox.showerror("Error", "Cantidad inválida."); return
 
@@ -812,21 +793,13 @@ class VentasFrame(tk.Frame):
             peso_caja = 0.0
 
         num_cajas = 0.0
-        if modalidad == "CAJAS→KILOS":
-            if peso_caja <= 0:
-                messagebox.showerror("Error", "No se puede usar CAJAS sin 'peso_caja'."); return
-            kilos = redondear_dos_decimales(cajas * peso_caja)
-            num_cajas = redondear_dos_decimales(cajas)
-        elif modalidad == "UNIDADES":
-            pass
-        else:  # KILOS
-            kilos = redondear_dos_decimales(kilos)
-
-        importe = 0.0
+        # importe: solo por kilos o unidades
         if modalidad == "UNIDADES":
             importe = redondear_dos_decimales(unidades * precio)
         else:
+            kilos = redondear_dos_decimales(kilos)
             importe = redondear_dos_decimales(kilos * precio)
+        
 
         self._cart.append({
             "producto_id": int(producto_id),
@@ -849,12 +822,12 @@ class VentasFrame(tk.Frame):
         # eliminamos por índice visual
         # mapeamos a (producto_id, kilos, unidades, precio, importe) para distinguir
         vals = self.tree_cart.item(sel[0], "values")
-        key = (int(vals[7]), float(vals[2]), int(vals[3]), float(vals[5].replace("$","").replace(",","")))
-        # busca el primero que coincida
+        key = (int(vals[7]), float(vals[2]), int(vals[3]), float(vals[4]), float(vals[5].replace("$","").replace(",","")))
         for i, it in enumerate(self._cart):
-            k = (it["producto_id"], round(it["kilos"],2), int(it["unidades"]), round(it["precio"],2))
+            k = (it["producto_id"], round(it["kilos"],2), int(it["unidades"]), round(it["num_cajas"],2), round(it["precio"],2))
             if k == key:
                 self._cart.pop(i); break
+
         self._cart_repaint()
 
     def _cart_clear(self):
@@ -886,23 +859,28 @@ class VentasFrame(tk.Frame):
                     pid = it["producto_id"]
                     if pid not in stock_map:
                         if self._productos_has_unidades:
-                            cur.execute("SELECT kilos, unidades FROM productos WHERE id=?", (pid,))
+                            cur.execute("SELECT kilos, num_cajas, unidades FROM productos WHERE id=?", (pid,))
                             r = cur.fetchone()
-                            stock_map[pid] = (float(r[0] or 0.0), int(r[1] or 0))
+                            stock_map[pid] = (float(r[0] or 0.0), float(r[1] or 0.0), int(r[2] or 0))
                         else:
-                            cur.execute("SELECT kilos FROM productos WHERE id=?", (pid,))
+                            cur.execute("SELECT kilos, num_cajas FROM productos WHERE id=?", (pid,))
                             r = cur.fetchone()
-                            stock_map[pid] = (float(r[0] or 0.0), None)
+                            stock_map[pid] = (float(r[0] or 0.0), float(r[1] or 0.0), None)
+
                 # verificar
                 for it in self._cart:
                     pid = it["producto_id"]
-                    sk_k, sk_u = stock_map[pid]
+                    sk_k, sk_cj, sk_u = stock_map[pid] if self._productos_has_unidades else (*stock_map[pid], None)
                     if it["unidades"] > 0:
                         if sk_u is None or it["unidades"] > sk_u:
                             raise ValueError(f"Stock insuficiente de unidades para {it['producto_nombre']}")
                     if it["kilos"] > 0:
                         if it["kilos"] > sk_k:
                             raise ValueError(f"Stock insuficiente de kilos para {it['producto_nombre']}")
+                    if it["num_cajas"] > 0:
+                        if it["num_cajas"] > sk_cj:
+                            raise ValueError(f"Stock insuficiente de cajas para {it['producto_nombre']}")
+
         except Exception as e:
             messagebox.showerror("Stock", str(e)); return
         # Persistencia
@@ -932,6 +910,9 @@ class VentasFrame(tk.Frame):
                         cur.execute("UPDATE productos SET unidades = unidades - ? WHERE id = ?", (int(it["unidades"]), int(it["producto_id"])))
                     if it["kilos"] > 0:
                         cur.execute("UPDATE productos SET kilos = kilos - ? WHERE id = ?", (float(it["kilos"]), int(it["producto_id"])))
+                    if it["num_cajas"] > 0:
+                        cur.execute("UPDATE productos SET num_cajas = num_cajas - ? WHERE id = ?", (float(it["num_cajas"]), int(it["producto_id"])))
+
                 # deuda cliente si crédito
                 if self._clientes_has_deuda and tipo_venta == "credito" and cliente_id:
                     cur.execute("UPDATE clientes SET deuda_total = deuda_total + ? WHERE id = ?", (float(total_venta), int(cliente_id)))
@@ -962,7 +943,7 @@ class VentasFrame(tk.Frame):
                             v.id, v.fecha{extra_estado}, p.nombre,
                             CASE
                                 WHEN IFNULL(v.unidades,0) > 0 THEN 'UNIDADES'
-                                WHEN IFNULL(v.kilos,0)    > 0 AND IFNULL(v.num_cajas,0) > 0 THEN 'CAJAS→KILOS'
+                                WHEN IFNULL(v.kilos,0)    > 0 THEN 'KILOS'
                                 WHEN IFNULL(v.kilos,0)    > 0 THEN 'KILOS'
                                 ELSE 'N/A'
                             END AS modo,
@@ -970,7 +951,7 @@ class VentasFrame(tk.Frame):
                             v.precio, COALESCE(v.total, v.kilos * v.precio) AS total,
                             v.tipo_venta, c.nombre
                         FROM ventas v
-                        LEFT JOIN productos p ON p.id = v.producto_id
+                         LEFT JOIN productos p ON p.id = v.producto_id
                         LEFT JOIN clientes c ON c.id = v.cliente_id
                         WHERE p.nombre LIKE ? OR IFNULL(c.nombre,'') LIKE ? OR IFNULL(v.tipo_venta,'') LIKE ? OR DATE(v.fecha) LIKE ?
                         ORDER BY v.fecha DESC
@@ -981,7 +962,7 @@ class VentasFrame(tk.Frame):
                             v.id, v.fecha{extra_estado}, p.nombre,
                             CASE
                                 WHEN IFNULL(v.unidades,0) > 0 THEN 'UNIDADES'
-                                WHEN IFNULL(v.kilos,0)    > 0 AND IFNULL(v.num_cajas,0) > 0 THEN 'CAJAS→KILOS'
+                                WHEN IFNULL(v.kilos,0)    > 0 THEN 'KILOS'
                                 WHEN IFNULL(v.kilos,0)    > 0 THEN 'KILOS'
                                 ELSE 'N/A'
                             END AS modo,
@@ -1399,23 +1380,21 @@ class VentasFrame(tk.Frame):
                 self.combo_producto.set(prod)
         else:
             self.combo_producto.set(prod)
-
+            
         # Limpiar entradas
         self.ent_unidades.delete(0, tk.END)
         self.ent_kilos.delete(0, tk.END)
         self.ent_cajas.delete(0, tk.END)
 
-        # Rellenar según modo
+        # Rellenar según modo (cajas es opcional/referencial)
         if data["modo"] == "UNIDADES":
             self.ent_unidades.insert(0, str(int(data["unidades"])))
-        elif data["modo"] == "CAJAS→KILOS":
-            # mostramos cajas referenciales si existen, si no, los kilos
-            if data["num_cajas"] > 0:
-                self.ent_cajas.insert(0, f"{redondear_dos_decimales(data['num_cajas']):.2f}")
-            else:
+        else:  # KILOS u otro
+            if data["kilos"] > 0:
                 self.ent_kilos.insert(0, f"{redondear_dos_decimales(data['kilos']):.2f}")
-        else:  # KILOS
-            self.ent_kilos.insert(0, f"{redondear_dos_decimales(data['kilos']):.2f}")
+        if data["num_cajas"] > 0:
+            self.ent_cajas.insert(0, f"{redondear_dos_decimales(data['num_cajas']):.2f}")
+
         # Precio: lo ponemos manual con el precio usado
         self.precio_mode.set("manual")
         self._on_precio_mode_change()

@@ -179,20 +179,22 @@ class InventarioFrame(tk.Frame):
         return body
 
     def _bind_scroll_wheel(self, canvas: tk.Canvas):
-        # Windows / Mac
+    # Windows / Mac
         def _on_mousewheel(event):
-            # en Windows: delta en ±120; en mac puede variar
-            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-        canvas.bind_all("<MouseWheel>", _on_mousewheel, add="+")
-
-        # Linux (rueda arriba/abajo)
-        def _on_button4(_e): canvas.yview_scroll(-3, "units")
-        def _on_button5(_e): canvas.yview_scroll(+3, "units")
-        canvas.bind_all("<Button-4>", _on_button4, add="+")
-        canvas.bind_all("<Button-5>", _on_button5, add="+")
-
-
-        # ---------------------------
+            if not canvas.winfo_exists():
+                return
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        canvas.bind("<MouseWheel>", _on_mousewheel)
+        # Linux (rueda)
+        def _on_button4(_e):
+            if canvas.winfo_exists():
+                canvas.yview_scroll(-3, "units")
+        def _on_button5(_e):
+            if canvas.winfo_exists():
+                canvas.yview_scroll(+3, "units")
+        canvas.bind("<Button-4>", _on_button4)
+        canvas.bind("<Button-5>", _on_button5)
+    # ---------------------------
     # Construcción de la UI
     # ---------------------------
     def _build_ui(self):
