@@ -38,11 +38,13 @@
 
 from __future__ import annotations
 
+from logging import root
 import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import datetime
 
 from db.database import get_connection
+from modules.calendar_widget import CalendarioWidget
 from ui.helpers import (
     formatear_fecha,
     redondear_dos_decimales,
@@ -346,29 +348,57 @@ class InventarioFrame(tk.Frame):
             "Motivo":     "str",
             "Fecha":      "date",
         })
+    # === CxP por compra (deudas <-> pagos) ===
+        cxp_panel = self._panel(root, pady=8, padx=8, fill="both", expand=True)
+        self._title(cxp_panel, "Gestión de Cuentas por Pagar por Compra")
 
-        # === PAGOS A PROVEEDOR ===
-        pagos_panel = self._panel(root, pady=8, padx=8, fill="x")
-        self._title(pagos_panel, "Pagos a Proveedor (Cuentas por Pagar)")
-        pg = tk.Frame(pagos_panel, bg=PALETTE["panel"])
-        pg.pack(fill="x", padx=8, pady=(0, 6))
+        # Filtros
+        filtros = tk.Frame(cxp_panel, bg=PALETTE["panel"]); filtros.pack(fill="x", padx=8, pady=(0,6))
+        tk.Label(filtros, text="Proveedor:", bg=PALETTE["panel"], fg=PALETTE["text"]).pack(side="left", padx=(0,6))
+        self.cxp_prov_filtro = self._combobox(filtros, width=26); self.cxp_prov_filtro.pack(side="left", padx=(0,12))
+        self.cxp_prov_filtro.bind("<<ComboboxSelected>>", lambda _e: self._cargar_cxp_creditos())
 
-        self._lbl(pg, "Proveedor:", row=0, column=0, padx=4, pady=4, sticky="e")
-        self.combo_prov_pago = self._combobox(pg, width=26, row=0, column=1, padx=4, pady=4, sticky="we")
-        pg.grid_columnconfigure(1, weight=1)
-        self.combo_prov_pago.bind("<<ComboboxSelected>>", lambda _e: self._actualizar_deuda_proveedor_pago())
+        tk.Label(filtros, text="Desde:", bg=PALETTE["panel"], fg=PALETTE["text"]).pack(side="left")
+        self.cxp_desde = ttk.Entry(filtros, width=12); self.cxp_desde.pack(side="left", padx=(6,4))
+        ttk.Button(filtros, text="📅", width=3, command=lambda: self._pick_date(self.cxp_desde)).pack(side="left", padx=(0,12))
 
-        self._lbl(pg, "Monto $:", row=0, column=2, padx=4, pady=4, sticky="e")
-        self.pago_monto_entry = self._entry(pg, width=14, row=0, column=3, padx=4, pady=4)
-        adjuntar_validador_2_decimales(self.pago_monto_entry, permitir_vacio=False)
+        tk.Label(filtros, text="Hasta:", bg=PALETTE["panel"], fg=PALETTE["text"]).pack(side="left")
+        self.cxp_hasta = ttk.Entry(filtros, width=12); self.cxp_hasta.pack(side="left", padx=(6,4))
+        ttk.Button(filtros, text="📅", width=3, command=lambda: self._pick_date(self.cxp_hasta)).pack(side="left", padx=(0,12))
 
-        self._lbl(pg, "Nota/Descripción:", row=0, column=4, padx=4, pady=4, sticky="e")
-        self.pago_desc_entry = self._entry(pg, width=40, row=0, column=5, padx=4, pady=4, sticky="we")
-        pg.grid_columnconfigure(5, weight=1)
+        ttk.Button(filtros, text="Recargar", command=self._cargar_cxp_creditos).pack(side="left", padx=(6,0))
 
-        self._btn(pg, "Registrar Pago", "TButton", self.registrar_pago_proveedor,
-                  row=0, column=6, padx=6, pady=4, sticky="w")
+        # Paneles lado a lado
+        dual = tk.Frame(cxp_panel, bg=PALETTE["panel"]); dual.pack(fill="both", expand=True, padx=8, pady=(6,0))
+        dual.grid_columnconfigure(0, weight=1); dual.grid_columnconfigure(1, weight=1); dual.grid_rowconfigure(0, weight=1)
 
+        # Izquierda: deudas (abiertas y cerradas)
+        left_box = tk.LabelFrame(dual, text="Compras a crédito (deudas abiertas y cerradas)",
+                                bg=PALETTE["panel"], fg=PALETTE["text"])
+        left_box.grid(row=0, column=0, sticky="nsew", padx=(0,6))
+        cols_deuda = ("Fecha","Proveedor","Producto","Monto","Saldo","DeudaID")
+        self.tree_cxp_deudas, _, _ = self._tree_with_scrolls(left_box, cols_deuda, height=8)
+        for col, w, a in (("Fecha",120,"center"),("Proveedor",180,"w"),("Producto",180,"w"),
+                        ("Monto",110,"e"),("Saldo",110,"e"),("DeudaID",70,"center")):
+            self.tree_cxp_deudas.heading(col, text=col)
+            self.tree_cxp_deudas.column(col, width=w, anchor=a, stretch=(col in ("Proveedor","Producto")))
+        self.tree_cxp_deudas.bind("<<TreeviewSelect>>", lambda _e: self._cargar_pagos_por_deuda())
+
+        # Derecha: pagos de la deuda seleccionada
+        right_box = tk.LabelFrame(dual, text="Pagos / Abonos", bg=PALETTE["panel"], fg=PALETTE["text"])
+        right_box.grid(row=0, column=1, sticky="nsew", padx=(6,0))
+        cols_pago = ("Fecha","DeudaID","Descripción","Monto")
+        self.tree_cxp_pagos, _, _ = self._tree_with_scrolls(right_box, cols_pago, height=8)
+        for col, w, a in (("Fecha",120,"center"),("DeudaID",80,"center"),("Descripción",260,"w"),("Monto",110,"e")):
+            self.tree_cxp_pagos.heading(col, text=col)
+            self.tree_cxp_pagos.column(col, width=w, anchor=a, stretch=(col == "Descripción"))
+
+        # Barra de acciones
+        barra = tk.Frame(cxp_panel, bg=PALETTE["panel"]); barra.pack(fill="x", padx=8, pady=(6,8))
+        ttk.Button(barra, text="Abonar a compra seleccionada…", style="Success.TButton",
+                command=self._abonar_compra_seleccionada).pack(side="left", padx=(0,8))
+        ttk.Button(barra, text="Ver pagos de la compra", command=self._cargar_pagos_por_deuda).pack(side="left")
+        
         # === PROVEEDORES (CRUD) ===
         prov_panel = self._panel(root, pady=8, padx=8, fill="both", expand=False)
         self._title(prov_panel, "Proveedores")
@@ -413,8 +443,199 @@ class InventarioFrame(tk.Frame):
         ):
             self.tree_prov.heading(col, text=col)
             self.tree_prov.column(col, width=w, anchor=a, stretch=(col in ("Nombre", "Dirección")))
-        self.tree_prov.bind("<Double-1>", lambda e: self.editar_proveedor())
-        
+        self.tree_prov.bind("<Double-1>", lambda e: self.editar_proveedor())    
+    # ====== CxP por compra (deudas <-> pagos) ======
+    def _pick_date(self, entry_widget):
+        """Abre el calendario; al elegir fecha llena el Entry y recarga la grilla."""
+        top = tk.Toplevel(self)
+        top.title("Seleccionar fecha")
+        # Modo libre: todas las fechas activas
+        CalendarioWidget(top, lambda fecha: (
+            entry_widget.delete(0, tk.END),
+            entry_widget.insert(0, fecha),
+            self._cargar_cxp_creditos()
+        ), fuentes=("all",))
+
+    def _deuda_seleccionada(self):
+        sel = self.tree_cxp_deudas.selection()
+        if not sel:
+            return None
+        vals = self.tree_cxp_deudas.item(sel[0], "values")
+        if not vals or len(vals) < 6:
+            return None
+        return int(vals[5])  # DeudaID
+
+    def _cargar_cxp_creditos(self):
+        """Llena la tabla izquierda con deudas (compras a crédito, abiertas y cerradas)."""
+        if not getattr(self, "_has_deudas_prov", False):
+            # Si aún no existe la tabla, intenta crearla (por si vienes de una DB vieja)
+            try:
+                with get_connection() as conn:
+                    self._ensure_deudas_proveedores(conn.cursor())
+            except Exception:
+                pass
+
+        # Limpiar grillas
+        if hasattr(self, "tree_cxp_deudas"):
+            self.tree_cxp_deudas.delete(*self.tree_cxp_deudas.get_children())
+        if hasattr(self, "tree_cxp_pagos"):
+            self.tree_cxp_pagos.delete(*self.tree_cxp_pagos.get_children())
+
+        prov_filtro = (self.cxp_prov_filtro.get() or "").strip()
+        prov_id = self.proveedores.get(prov_filtro) if prov_filtro and prov_filtro != "(todos)" else None
+        desde = (self.cxp_desde.get() or "").strip()
+        hasta = (self.cxp_hasta.get() or "").strip()
+
+        try:
+            with get_connection() as conn:
+                cur = conn.cursor()
+                sql = """
+                    SELECT d.id, d.fecha, pr.nombre AS proveedor, p.nombre AS producto,
+                           d.monto, d.saldo
+                    FROM deudas_proveedores d
+                    JOIN proveedores pr ON pr.id = d.proveedor_id
+                    LEFT JOIN productos   p ON p.id = d.producto_id
+                    WHERE 1=1
+                """
+                params = []
+                if prov_id:
+                    sql += " AND d.proveedor_id = ?"
+                    params.append(int(prov_id))
+                if desde:
+                    sql += " AND DATE(d.fecha) >= DATE(?)"
+                    params.append(desde)
+                if hasta:
+                    sql += " AND DATE(d.fecha) <= DATE(?)"
+                    params.append(hasta)
+                sql += " ORDER BY d.fecha DESC, d.id DESC"
+                cur.execute(sql, tuple(params))
+                rows = cur.fetchall()
+
+            for deuda_id, fecha, proveedor, producto, monto, saldo in rows:
+                self.tree_cxp_deudas.insert("", "end", values=(
+                    (fecha.split(" ")[0] if fecha else ""),
+                    proveedor or "",
+                    producto or "",
+                    formato_moneda(float(monto or 0.0)),
+                    formato_moneda(float(saldo or 0.0)),
+                    int(deuda_id),
+                ))
+        except Exception as e:
+            messagebox.showerror("CxP", f"No se pudieron cargar las deudas.\n{e}")
+
+    def _cargar_pagos_por_deuda(self):
+        """Llena la tabla derecha con los pagos de la deuda seleccionada."""
+        if not hasattr(self, "tree_cxp_pagos"):
+            return
+        self.tree_cxp_pagos.delete(*self.tree_cxp_pagos.get_children())
+        deuda_id = self._deuda_seleccionada()
+        if not deuda_id:
+            return
+        try:
+            with get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT fecha, descripcion, monto
+                    FROM pagos_proveedores
+                    WHERE deuda_proveedor_id = ?
+                    ORDER BY fecha DESC, id DESC
+                """, (int(deuda_id),))
+                for fecha, desc, monto in cur.fetchall():
+                    self.tree_cxp_pagos.insert("", "end", values=(
+                        (fecha.split(" ")[0] if fecha else ""),
+                        int(deuda_id),
+                        (desc or ""),
+                        formato_moneda(float(monto or 0.0)),
+                    ))
+        except Exception:
+            # Silencioso: si la tabla aún no tiene FK deuda_proveedor_id
+            pass
+
+    def _abonar_compra_seleccionada(self):
+        """Abre un diálogo y registra un pago exactamente sobre la deuda seleccionada."""
+        deuda_id = self._deuda_seleccionada()
+        if not deuda_id:
+            messagebox.showinfo("Abonar", "Selecciona primero una compra en la lista de deudas.")
+            return
+
+        try:
+            with get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT d.proveedor_id, pr.nombre, d.saldo
+                    FROM deudas_proveedores d
+                    JOIN proveedores pr ON pr.id = d.proveedor_id
+                    WHERE d.id = ?
+                """, (int(deuda_id),))
+                row = cur.fetchone()
+                if not row:
+                    messagebox.showerror("Abonar", "Deuda no encontrada.")
+                    return
+                prov_id, prov_nombre, saldo = int(row[0]), (row[1] or ""), float(row[2] or 0.0)
+        except Exception as e:
+            messagebox.showerror("Abonar", f"No se pudo leer la deuda.\n{e}")
+            return
+
+        if saldo <= 0:
+            messagebox.showinfo("Abonar", "Esta deuda ya está saldada.")
+            return
+
+        # Diálogo simple
+        win = tk.Toplevel(self)
+        win.title("Abonar a compra")
+        try: win.configure(bg=PALETTE["bg"])
+        except Exception: pass
+
+        tk.Label(win, text=f"Proveedor: {prov_nombre}", bg=PALETTE["bg"], fg=PALETTE["text"])\
+            .grid(row=0, column=0, columnspan=2, padx=10, pady=(10, 4), sticky="w")
+        tk.Label(win, text=f"Saldo pendiente: {formato_moneda(saldo)}", bg=PALETTE["bg"], fg=PALETTE["text"])\
+            .grid(row=1, column=0, columnspan=2, padx=10, pady=(0, 10), sticky="w")
+
+        tk.Label(win, text="Monto $:", bg=PALETTE["bg"], fg=PALETTE["text"]).grid(row=2, column=0, padx=10, pady=6, sticky="e")
+        ent_monto = ttk.Entry(win, width=16); ent_monto.grid(row=2, column=1, padx=10, pady=6, sticky="w")
+        adjuntar_validador_2_decimales(ent_monto, permitir_vacio=False)
+
+        tk.Label(win, text="Descripción:", bg=PALETTE["bg"], fg=PALETTE["text"]).grid(row=3, column=0, padx=10, pady=6, sticky="e")
+        ent_desc = ttk.Entry(win, width=36); ent_desc.grid(row=3, column=1, padx=10, pady=6, sticky="we")
+        win.grid_columnconfigure(1, weight=1)
+
+        def guardar():
+            from ui.helpers import to_float, redondear_dos_decimales
+            try:
+                monto = to_float(ent_monto.get(), permitir_cero=False)
+            except Exception:
+                messagebox.showerror("Monto", "Monto inválido.", parent=win); return
+            if monto <= 0:
+                messagebox.showerror("Monto", "El monto debe ser mayor a 0.", parent=win); return
+            if monto > saldo:
+                if not messagebox.askyesno("Confirmar", "El monto excede el saldo. ¿Registrar de todos modos (se recorta al saldo)?", parent=win):
+                    return
+            desc = (ent_desc.get() or "Abono a compra").strip()
+            fecha_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            try:
+                with get_connection() as conn:
+                    cur = conn.cursor()
+                    aplica = min(monto, saldo)
+                    cur.execute("""
+                        INSERT INTO pagos_proveedores (proveedor_id, deuda_proveedor_id, monto, fecha, descripcion)
+                        VALUES (?, ?, ?, ?, ?)
+                    """, (int(prov_id), int(deuda_id), float(aplica), fecha_str, desc))
+                    nuevo_saldo = redondear_dos_decimales(saldo - aplica)
+                    cur.execute("UPDATE deudas_proveedores SET saldo = ? WHERE id = ?", (float(nuevo_saldo), int(deuda_id)))
+                messagebox.showinfo("Éxito", "Abono registrado.")
+                win.destroy()
+                self._cargar_cxp_creditos()
+                self._cargar_pagos_por_deuda()
+            except Exception as e:
+                messagebox.showerror("Error", f"No se pudo registrar el abono.\n{e}", parent=win)
+
+        ttk.Button(win, text="Guardar", command=guardar, style="Success.TButton")\
+            .grid(row=4, column=0, columnspan=2, pady=10)
+        win.bind("<Return>", lambda _e: guardar())
+        win.bind("<Escape>", lambda _e: win.destroy())
+        try: win.grab_set(); ent_monto.focus_set()
+        except Exception: pass        
 
     # ---------------------------
     # Post-construcción
@@ -431,15 +652,26 @@ class InventarioFrame(tk.Frame):
         self.cargar_proveedores()
         self.cargar_movimientos()
 
+        # Filtros CxP por compra: proveedor + rango por defecto (día de hoy)
         try:
-            self.after_idle(lambda: self.combo_producto.focus_set())
+            self.cxp_prov_filtro["values"] = ["(todos)"] + list(self.proveedores.keys())
+            if not self.cxp_prov_filtro.get():
+                self.cxp_prov_filtro.current(0)
         except Exception:
             pass
 
+        hoy = datetime.now().strftime("%Y-%m-%d")
         try:
-            self._actualizar_deuda_proveedor_pago()
+            if not self.cxp_desde.get().strip():
+                self.cxp_desde.insert(0, hoy)
+            if not self.cxp_hasta.get().strip():
+                self.cxp_hasta.insert(0, hoy)
         except Exception:
             pass
+
+        self._cargar_cxp_creditos()
+
+
 
 
     # ---------------------------
@@ -631,9 +863,6 @@ class InventarioFrame(tk.Frame):
         self.combo_proveedor["values"] = ["(sin proveedor)"] + nombres
         if not self.combo_proveedor.get():
             self.combo_proveedor.current(0)
-        self.combo_prov_pago["values"] = nombres
-        if nombres and not self.combo_prov_pago.get():
-            self.combo_prov_pago.current(0)
 
         # Tabla
         self.tree_prov.delete(*self.tree_prov.get_children())
@@ -642,6 +871,57 @@ class InventarioFrame(tk.Frame):
             self.tree_prov.insert("", "end", values=(pid, nombre, tel or "", dire or "", deuda_txt))
 
         set_treeview_stripes(self.tree_prov, even_bg=PALETTE.get("alt_row"), odd_bg=PALETTE.get("panel"))
+        
+        try:
+            self.cxp_prov_filtro["values"] = ["(todos)"] + list(self.proveedores.keys())
+            if not self.cxp_prov_filtro.get():
+                self.cxp_prov_filtro.current(0)
+        except Exception:
+            pass
+
+        
+    def _actualizar_deuda_proveedor_pago(self):
+        """Llena la tabla de deudas abiertas según el proveedor seleccionado en el combo de pagos."""
+        if not getattr(self, "_has_deudas_prov", False):
+            if hasattr(self, "tree_deudas"):
+                self.tree_deudas.delete(*self.tree_deudas.get_children())
+            return
+
+        prov_nombre = (self.combo_prov_pago.get() or "").strip()
+        prov_id = self.proveedores.get(prov_nombre)
+        if not prov_id or not hasattr(self, "tree_deudas"):
+            return
+
+        try:
+            with get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT d.id,
+                           d.fecha,
+                           IFNULL(p.nombre,'(s/n)') AS producto,
+                           d.monto,
+                           d.saldo,
+                           IFNULL(d.descripcion,'')
+                    FROM deudas_proveedores d
+                    LEFT JOIN productos p ON p.id = d.producto_id
+                    WHERE d.proveedor_id = ? AND d.saldo > 0
+                    ORDER BY d.fecha ASC, d.id ASC
+                """, (int(prov_id),))
+                rows = cur.fetchall()
+        except Exception as e:
+            messagebox.showerror("CxP", f"No se pudo cargar deudas del proveedor.\n{e}")
+            return
+
+        self.tree_deudas.delete(*self.tree_deudas.get_children())
+        for did, fecha, prod, monto, saldo, desc in rows:
+            self.tree_deudas.insert("", "end", values=(
+                int(did),
+                formatear_fecha(fecha),
+                prod or "",
+                formato_moneda(float(monto or 0)),
+                formato_moneda(float(saldo or 0)),
+                desc or ""
+            ))
 
 
 
@@ -889,6 +1169,7 @@ class InventarioFrame(tk.Frame):
         if not prov_id:
             messagebox.showerror("Proveedor", "Proveedor no encontrado.")
             return
+
         try:
             monto = to_float(self.pago_monto_entry.get() or 0, permitir_cero=False)
         except ValueError:
@@ -897,73 +1178,96 @@ class InventarioFrame(tk.Frame):
         if monto <= 0:
             messagebox.showerror("Monto", "El monto debe ser mayor a 0.")
             return
+
         nota = (self.pago_desc_entry.get() or "").strip()
         fecha_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # ¿Seleccionaste una deuda en la tabla?
+        deuda_sel_id = None
+        if hasattr(self, "tree_deudas"):
+            sel = self.tree_deudas.selection()
+            if sel:
+                vals = self.tree_deudas.item(sel[0], "values")
+                if vals:
+                    deuda_sel_id = int(vals[0])
 
         try:
             with get_connection() as conn:
                 cur = conn.cursor()
-                # 1) Insertar pago en pagos_proveedores con los campos disponibles
-                pago_id = None
-                if self._pagos_has_proveedor_id:
+
+                # 1) Registrar el pago con las columnas disponibles
+                if self._pagos_has_proveedor_id and self._pagos_has_deuda_fk:
+                    cur.execute("""
+                        INSERT INTO pagos_proveedores (proveedor_id, deuda_proveedor_id, monto, fecha, descripcion)
+                        VALUES (?, ?, ?, ?, ?)
+                    """, (int(prov_id), deuda_sel_id, float(monto), fecha_str, nota))
+                elif self._pagos_has_proveedor_id:
                     cur.execute("""
                         INSERT INTO pagos_proveedores (proveedor_id, monto, fecha, descripcion)
                         VALUES (?, ?, ?, ?)
                     """, (int(prov_id), float(monto), fecha_str, nota))
-                    pago_id = cur.lastrowid
-                elif self._pagos_has_deuda_fk and self._has_deudas_prov:
-                    # Si no hay proveedor_id pero sí deuda_proveedor_id, necesitaremos asociar a una deuda.
-                    # Insertaremos temporalmente con la primera deuda abierta, y luego repartimos si hay más.
-                    cur.execute("""
-                        SELECT id FROM deudas_proveedores
-                        WHERE proveedor_id = ? AND saldo > 0
-                        ORDER BY fecha ASC, id ASC
-                        LIMIT 1
-                    """, (int(prov_id),))
-                    row = cur.fetchone()
-                    deuda_id_for_insert = int(row[0]) if row else None
+                elif self._pagos_has_deuda_fk:
                     cur.execute("""
                         INSERT INTO pagos_proveedores (deuda_proveedor_id, monto, fecha, descripcion)
                         VALUES (?, ?, ?, ?)
-                    """, (deuda_id_for_insert, float(monto), fecha_str, nota))
-                    pago_id = cur.lastrowid
+                    """, (deuda_sel_id, float(monto), fecha_str, nota))
                 else:
-                    # Último recurso: tabla sin FK esperada. Guardamos un registro mínimo.
                     cur.execute("""
                         INSERT INTO pagos_proveedores (monto, fecha, descripcion)
                         VALUES (?, ?, ?)
                     """, (float(monto), fecha_str, nota))
-                    pago_id = cur.lastrowid
 
-                # 2) Aplicar pago a deudas del proveedor (FIFO) si la tabla existe
+                # 2) Aplicar el pago
+                restante = float(monto)
+
                 if self._has_deudas_prov:
-                    restante = float(monto)
-                    # Obtener deudas abiertas
-                    cur.execute("""
-                        SELECT id, saldo FROM deudas_proveedores
-                        WHERE proveedor_id = ? AND saldo > 0
-                        ORDER BY fecha ASC, id ASC
-                    """, (int(prov_id),))
-                    deudas = [(int(r[0]), float(r[1] or 0.0)) for r in cur.fetchall()]
-
-                    for deuda_id, saldo in deudas:
-                        if restante <= 0:
-                            break
+                    if deuda_sel_id:
+                        # Aplica SOLO a la deuda seleccionada; si sobra, pasa a FIFO
+                        cur.execute("SELECT saldo FROM deudas_proveedores WHERE id = ?", (int(deuda_sel_id),))
+                        row = cur.fetchone()
+                        if not row:
+                            raise ValueError("La deuda seleccionada ya no existe.")
+                        saldo = float(row[0] or 0.0)
                         aplica = min(restante, saldo)
-                        nuevo_saldo = redondear_dos_decimales(saldo - aplica)
-                        cur.execute("UPDATE deudas_proveedores SET saldo = ? WHERE id = ?", (float(nuevo_saldo), int(deuda_id)))
+                        cur.execute("UPDATE deudas_proveedores SET saldo = ? WHERE id = ?",
+                                    (float(redondear_dos_decimales(saldo - aplica)), int(deuda_sel_id)))
                         restante = redondear_dos_decimales(restante - aplica)
 
-                    # Opcional: Si la tabla pagos_proveedores tiene FK deuda_proveedor_id pero insertamos sin ella,
-                    # no redistribuimos a nivel fila (porque un pago único se aplicó a múltiples deudas).
-                    # El saldo ya quedó consistente en deudas_proveedores.
+                        if restante > 0:
+                            cur.execute("""
+                                SELECT id, saldo FROM deudas_proveedores
+                                WHERE proveedor_id = ? AND saldo > 0 AND id <> ?
+                                ORDER BY fecha ASC, id ASC
+                            """, (int(prov_id), int(deuda_sel_id)))
+                            for did, s in [(int(r[0]), float(r[1] or 0.0)) for r in cur.fetchall()]:
+                                if restante <= 0: break
+                                ap = min(restante, s)
+                                cur.execute("UPDATE deudas_proveedores SET saldo = ? WHERE id = ?",
+                                            (float(redondear_dos_decimales(s - ap)), int(did)))
+                                restante = redondear_dos_decimales(restante - ap)
+                    else:
+                        # FIFO clásico si no seleccionaste nada
+                        cur.execute("""
+                            SELECT id, saldo FROM deudas_proveedores
+                            WHERE proveedor_id = ? AND saldo > 0
+                            ORDER BY fecha ASC, id ASC
+                        """, (int(prov_id),))
+                        for did, saldo in [(int(r[0]), float(r[1] or 0.0)) for r in cur.fetchall()]:
+                            if restante <= 0: break
+                            ap = min(restante, saldo)
+                            cur.execute("UPDATE deudas_proveedores SET saldo = ? WHERE id = ?",
+                                        (float(redondear_dos_decimales(saldo - ap)), int(did)))
+                            restante = redondear_dos_decimales(restante - ap)
 
-            messagebox.showinfo("Éxito", "Pago registrado y aplicado a deudas (si existían).")
+            messagebox.showinfo("Éxito", "Pago registrado y aplicado.")
             self.pago_monto_entry.delete(0, tk.END)
             self.pago_desc_entry.delete(0, tk.END)
-
+            # Refrescar UI relacionada
+            self._actualizar_deuda_proveedor_pago()
+            self.cargar_proveedores()
         except Exception as e:
             messagebox.showerror("Error", f"No se pudo registrar el pago.\n{e}")
+
 
     # ---------------------------
     # Listado / búsqueda

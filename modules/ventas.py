@@ -158,20 +158,9 @@ class VentasFrame(tk.Frame):
         self.combo_producto.bind("<<ComboboxSelected>>", self._on_producto_change)
         self.combo_producto.bind("<Return>", lambda e: self._do_sale())
 
-        # Unidades (entero ≥ 1)
-        tk.Label(form, text="Unidades:", bg=BRAND_PALETTE["panel"], fg=BRAND_PALETTE["text"])\
-            .grid(row=0, column=2, sticky="e", padx=4, pady=2)
-        self.ent_unidades = tk.Entry(form, width=10,
-                                     bg=BRAND_PALETTE["entry_bg"], fg=BRAND_PALETTE["entry_fg"],
-                                     relief="flat", highlightthickness=1,
-                                     highlightbackground=BRAND_PALETTE["border"], highlightcolor=BRAND_PALETTE["accent"],
-                                     validate="key", validatecommand=vcmd_entero)
-        self.ent_unidades.grid(row=0, column=3, padx=4, pady=2, sticky="we")
-        self.ent_unidades.bind("<Return>", lambda e: self._do_sale())
-
         # Kilos (decimal)
         tk.Label(form, text="Kilos:", bg=BRAND_PALETTE["panel"], fg=BRAND_PALETTE["text"])\
-            .grid(row=0, column=4, sticky="e", padx=4, pady=2)
+            .grid(row=0, column=2, sticky="e", padx=4, pady=2)
         self.ent_kilos = tk.Entry(form, width=10,
                                   bg=BRAND_PALETTE["entry_bg"], fg=BRAND_PALETTE["entry_fg"],
                                   relief="flat", highlightthickness=1,
@@ -183,7 +172,7 @@ class VentasFrame(tk.Frame):
 
         # Cajas (decimal — informativo/convertidor)
         tk.Label(form, text="Cajas:", bg=BRAND_PALETTE["panel"], fg=BRAND_PALETTE["text"])\
-            .grid(row=0, column=6, sticky="e", padx=4, pady=2)
+            .grid(row=0, column=4, sticky="e", padx=4, pady=2)
         self.ent_cajas = tk.Entry(form, width=10,
                                   bg=BRAND_PALETTE["entry_bg"], fg=BRAND_PALETTE["entry_fg"],
                                   relief="flat", highlightthickness=1,
@@ -192,6 +181,17 @@ class VentasFrame(tk.Frame):
         self.ent_cajas.grid(row=0, column=7, padx=4, pady=2, sticky="we")
         self.ent_cajas.bind("<Return>", lambda e: self._do_sale())
         adjuntar_validador_2_decimales(self.ent_cajas, permitir_vacio=True)
+        
+        # Unidades (entero ≥ 1)
+        tk.Label(form, text="Unidades:", bg=BRAND_PALETTE["panel"], fg=BRAND_PALETTE["text"])\
+            .grid(row=0, column=6, sticky="e", padx=4, pady=2)
+        self.ent_unidades = tk.Entry(form, width=10,
+                                     bg=BRAND_PALETTE["entry_bg"], fg=BRAND_PALETTE["entry_fg"],
+                                     relief="flat", highlightthickness=1,
+                                     highlightbackground=BRAND_PALETTE["border"], highlightcolor=BRAND_PALETTE["accent"],
+                                     validate="key", validatecommand=vcmd_entero)
+        self.ent_unidades.grid(row=0, column=3, padx=4, pady=2, sticky="we")
+        self.ent_unidades.bind("<Return>", lambda e: self._do_sale())
 
         # Modo de precio
         mode_frame = tk.Frame(form, bg=BRAND_PALETTE["panel"])
@@ -560,10 +560,10 @@ class VentasFrame(tk.Frame):
             messagebox.showwarning("Producto", "Selecciona un producto")
             return
 
-                # Modalidad (UNIDADES o KILOS) — CAJAS es solo referencial (para descontar stock de cajas)
-        unidades_txt = self.ent_unidades.get().strip()
-        cajas_txt    = self.ent_cajas.get().strip()
+        # Modalidad (UNIDADES o KILOS) — CAJAS es solo referencial (para descontar stock de cajas)
         kilos_txt    = self.ent_kilos.get().strip()
+        cajas_txt    = self.ent_cajas.get().strip()
+        unidades_txt = self.ent_unidades.get().strip()
 
         # CAJAS: opcional, solo para restar stock de num_cajas (no afecta total)
         try:
@@ -575,10 +575,17 @@ class VentasFrame(tk.Frame):
             return
 
         modalidad = None
-        unidades = 0
         kilos = 0.0
+        unidades = 0
 
-        if unidades_txt:
+        if kilos_txt:
+            try:
+                kilos = to_float(kilos_txt, permitir_cero=False)
+            except ValueError:
+                messagebox.showerror("Error", "Kilos inválidos.")
+                return
+            modalidad = "kilos"
+        elif unidades_txt:
             if not self._productos_has_unidades:
                 messagebox.showerror("No disponible", "La BD no soporta venta por unidades (no existe 'productos.unidades').")
                 return
@@ -590,13 +597,7 @@ class VentasFrame(tk.Frame):
                 messagebox.showerror("Error", "Unidades inválidas (entero positivo).")
                 return
             modalidad = "unidades"
-        elif kilos_txt:
-            try:
-                kilos = to_float(kilos_txt, permitir_cero=False)
-            except ValueError:
-                messagebox.showerror("Error", "Kilos inválidos.")
-                return
-            modalidad = "kilos"
+        
         else:
             # Si solo metieron cajas, NO se permite (total se calcula por kilos o unidades)
             messagebox.showerror("Error", "Ingresa Kilos o Unidades para registrar la venta.\n(Cajas son solo de control de inventario)")
