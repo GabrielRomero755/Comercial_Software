@@ -34,6 +34,9 @@
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
+import tempfile
 import sys
 import platform
 from datetime import datetime
@@ -109,6 +112,39 @@ def _open_file(path: str) -> None:
         # Si no se puede abrir, lo ignoramos silenciosamente.
         pass
 
+def _cups_available() -> bool:
+    return shutil.which("lp") is not None
+
+def print_with_lp(file_path: str,
+                  printer_name: str | None = None,
+                  copies: int = 1,
+                  media: str | None = None,
+                  fit_to_page: bool = True) -> bool:
+    """
+    Envía un archivo (PDF o TXT) a la impresora predeterminada o a 'printer_name' usando CUPS.
+    - media: por ej. 'Custom.80x200mm' o 'A4'. Si tu driver lo soporta, ajusta el rollo.
+    - fit_to_page: añade '-o fit-to-page' para PDFs “más grandes” que el medio elegido.
+    """
+    if not _cups_available():
+        return False
+
+    cmd = ["lp"]
+    if printer_name:
+        cmd += ["-d", printer_name]
+    if isinstance(copies, int) and copies > 1:
+        cmd += ["-n", str(copies)]
+    if media:
+        cmd += ["-o", f"media={media}"]
+    if fit_to_page:
+        cmd += ["-o", "fit-to-page"]
+    cmd += [file_path]
+
+    try:
+        subprocess.run(cmd, check=True)
+        return True
+    except Exception as e:
+        print(f"[tickets] lp falló: {e}")
+        return False
 
 # ===========================================================
 # Generación de archivos
@@ -294,14 +330,9 @@ def generate_ticket_txt_thermal(ticket: dict, output_path: str, width: int = 42)
 # Integración con la BD y punto de entrada público
 # ===========================================================
 def _load_sale_from_db(venta_id: int) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """
-    Lee venta + producto (+ cliente si existe). Devuelve:
-      - venta: dict con campos crudos (kilos, unidades, precio, total, etc.)
-      - meta:  dict auxiliar (nombre_producto, nombre_cliente, peso_caja opcional)
-    """
     with get_connection() as conn:
         cur = conn.cursor()
-        # Venta y producto
+        # Encabezado
         cur.execute("""
             SELECT v.id, v.producto_id, v.kilos, v.num_cajas, v.unidades, v.precio, v.total,
                    v.tipo_venta, v.cliente_id, v.fecha
@@ -314,7 +345,7 @@ def _load_sale_from_db(venta_id: int) -> Tuple[Dict[str, Any], Dict[str, Any]]:
 
         venta = {
             "id": int(v[0]),
-            "producto_id": int(v[1]),
+            "producto_id": v[1] if v[1] is not None else None,
             "kilos": float(v[2] or 0.0),
             "num_cajas": float(v[3] or 0.0),
             "unidades": int(v[4] or 0),
@@ -325,17 +356,49 @@ def _load_sale_from_db(venta_id: int) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             "fecha": v[9],
         }
 
-        cur.execute("""
-            SELECT nombre, peso_caja FROM productos WHERE id = ?
-        """, (venta["producto_id"],))
-        p = cur.fetchone()
-        if not p:
-            raise ValueError("Producto de la venta no encontrado.")
-        nombre_producto = p[0] or "Producto"
-        peso_caja = float(p[1] or 0.0)
+        # ¿Existe tabla de detalle?
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='venta_items'")
+        has_detalle = cur.fetchone() is not None
 
+        items = []
         nombre_cliente = ""
-        # Cliente puede no existir o no tener campo nombre en esquemas antiguos
+        peso_caja = 0.0  # irrelevante en multi-item, se usa por compatibilidad
+
+        if has_detalle:
+            cur.execute("""
+                SELECT vi.producto_id, IFNULL(p.nombre,''), 
+                       IFNULL(vi.kilos,0), IFNULL(vi.unidades,0), IFNULL(vi.num_cajas,0),
+                       IFNULL(vi.precio,0), IFNULL(vi.importe,0)
+                FROM venta_items vi
+                LEFT JOIN productos p ON p.id = vi.producto_id
+                WHERE vi.venta_id = ?
+                ORDER BY vi.id
+            """, (venta_id,))
+            for pid, pnom, k, u, nc, pre, imp in cur.fetchall():
+                items.append({
+                    "producto": pnom or "Producto",
+                    "kilos": float(k or 0.0),
+                    "unidades": int(u or 0),
+                    "precio": float(pre or 0.0),
+                    "importe": float(imp or 0.0),
+                })
+        else:
+            # legacy: una sola línea en ventas
+            cur.execute("SELECT nombre, peso_caja FROM productos WHERE id = ?", (venta["producto_id"],))
+            p = cur.fetchone()
+            nombre_producto = (p[0] if p and p[0] else "Producto")
+            peso_caja = float(p[1] or 0.0) if p else 0.0
+            items = [{
+                "producto": nombre_producto,
+                "kilos": float(venta.get("kilos") or 0.0),
+                "unidades": int(venta.get("unidades") or 0),
+                "precio": float(venta.get("precio") or 0.0),
+                "importe": float(venta.get("total") or 0.0) or
+                           (float(venta.get("kilos") or 0.0) * float(venta.get("precio") or 0.0) if float(venta.get("kilos") or 0.0) > 0
+                            else int(venta.get("unidades") or 0) * float(venta.get("precio") or 0.0)),
+            }]
+
+        # Cliente (opcional)
         try:
             if venta["cliente_id"] is not None:
                 cur.execute("SELECT nombre FROM clientes WHERE id = ?", (venta["cliente_id"],))
@@ -346,10 +409,16 @@ def _load_sale_from_db(venta_id: int) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             nombre_cliente = ""
 
         meta = {
-            "nombre_producto": nombre_producto,
+            "nombre_producto": (items[0]["producto"] if items else "Producto"),
             "nombre_cliente": nombre_cliente,
             "peso_caja": peso_caja,
         }
+        # re-usa venta['total'] como total de encabezado; si viene cero, suma items
+        if not venta["total"]:
+            venta["total"] = sum(float(i["importe"] or 0.0) for i in items)
+
+        # Sobrescribe: devolveremos items en _build_ticket_dict
+        venta["_items"] = items
         return venta, meta
 
 
@@ -361,6 +430,27 @@ def _build_ticket_dict(venta: Dict[str, Any], meta: Dict[str, Any], reimpresion:
     unidades = int(venta.get("unidades") or 0)
     precio = float(venta.get("precio") or 0.0)
     total = float(venta.get("total") or (kilos * precio if kilos > 0 else unidades * precio))
+
+    # si viene lista multi-item desde el loader, úsala
+    if "_items" in venta and venta["_items"]:
+        items = list(venta["_items"])
+        total = sum(float(i.get("importe") or 0.0) for i in items)
+        kilos = sum(float(i.get("kilos") or 0.0) for i in items)
+        unidades = sum(int(i.get("unidades") or 0) for i in items)
+    else:
+        # (tu código actual de una sola línea)
+        kilos = float(venta.get("kilos") or 0.0)
+        unidades = int(venta.get("unidades") or 0)
+        precio = float(venta.get("precio") or 0.0)
+        total = float(venta.get("total") or (kilos * precio if kilos > 0 else unidades * precio))
+        items = [{
+            "producto": meta["nombre_producto"],
+            "kilos": kilos,
+            "unidades": unidades,
+            "precio": precio,
+            "importe": total,
+        }]
+
 
     items = [{
         "producto": meta["nombre_producto"],
@@ -392,6 +482,8 @@ def imprimir_ticket(
     output_dir: Optional[str] = None,
     thermal_txt_also: bool = False,
     thermal_width: int = 42,
+    print_direct: bool = False,
+    printer_name: Optional[str] = None,
 ) -> str:
     """
     Genera (y opcionalmente abre) el ticket de una venta.
@@ -425,8 +517,14 @@ def imprimir_ticket(
             # No interrumpimos si falla la versión térmica
             pass
 
-    # 5) Abrir archivo si procede
-    if abrir_archivo:
-        _open_file(main_path)
+    # 5) Mostrar o imprimir
+    if print_direct:
+        # Intentar mandar a impresora (PDF o TXT). Si falla, abrir para vista previa.
+        ok = print_with_lp(main_path, printer_name=printer_name)
+        if not ok and abrir_archivo:
+            _open_file(main_path)
+    else:
+        if abrir_archivo:
+            _open_file(main_path)
 
     return main_path

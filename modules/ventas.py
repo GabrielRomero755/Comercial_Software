@@ -30,7 +30,6 @@
 from __future__ import annotations
 
 import tkinter as tk
-import os, shutil, subprocess, tempfile, webbrowser
 from tkinter import ttk, messagebox, simpledialog
 from datetime import datetime
 
@@ -43,6 +42,8 @@ from ui.helpers import (
     formatear_fecha,
     adjuntar_validador_2_decimales,
 )
+
+from ui.tickets import imprimir_ticket
 
 # -----------------------------------------------------------
 # VentasFrame
@@ -62,9 +63,9 @@ class VentasFrame(tk.Frame):
         self._ventas_has_eventos = False
         self._productos_has_unidades = False
         self._clientes_has_deuda = False
-
-        # <-- AGREGA esto aquí (antes de _inspect_schema) y NO lo repitas luego
+        self._has_venta_items = False
         self._ventas_eventos_cols: set[str] = set()
+        self._cart: list[dict] = []
 
         # Modo de precio / crédito / cache
         self.precio_mode = tk.StringVar(value="manual")
@@ -72,7 +73,7 @@ class VentasFrame(tk.Frame):
         self._venta_por_iid: dict[str, dict] = {}
 
         self._build_ui()
-        self._inspect_schema()   # <- ahora sí pobla self._ventas_eventos_cols
+        self._inspect_schema()
         self._load_catalogs()
         self._load_sales()
         self._install_shortcuts()
@@ -83,8 +84,63 @@ class VentasFrame(tk.Frame):
     # UI
     # ---------------------------
     def _build_ui(self):
+        
+        # --- contenedor scrollable ---
+        outer = tk.Frame(self, bg=BRAND_PALETTE["bg"])
+        outer.pack(fill="both", expand=True)
+
+        canvas = tk.Canvas(outer, bg=BRAND_PALETTE["bg"], highlightthickness=0)
+        vbar = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vbar.set)
+
+        vbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+
+        # body es donde agregamos el contenido real
+        self.body = tk.Frame(canvas, bg=BRAND_PALETTE["bg"])
+        # Guardamos el id de la ventana para poder ajustar el ancho
+        self._canvas_window = canvas.create_window((0, 0), window=self.body, anchor="nw")
+
+        def _on_body_config(_):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        self.body.bind("<Configure>", _on_body_config)
+
+        def _on_canvas_config(e):
+            # Hace que el frame interno se estire al ancho del canvas
+            canvas.itemconfigure(self._canvas_window, width=e.width)
+        canvas.bind("<Configure>", _on_canvas_config)
+
+        # Rueda del mouse
+        def _on_mousewheel(evt):
+            if evt.num == 4 or evt.delta > 0:
+                canvas.yview_scroll(-1, "units")
+            elif evt.num == 5 or evt.delta < 0:
+                canvas.yview_scroll(1, "units")
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)   # Windows
+        canvas.bind_all("<Button-4>", _on_mousewheel)     # Linux
+        canvas.bind_all("<Button-5>", _on_mousewheel)     # Linux
+
+
+        # ajustar el scrollregion cuando cambie el tamaño del contenido
+        def _on_body_config(_):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        self.body.bind("<Configure>", _on_body_config)
+
+        # Opcional: rueda del mouse
+        def _on_mousewheel(evt):
+            # Windows / Linux
+            if evt.num == 4 or evt.delta > 0:
+                canvas.yview_scroll(-1, "units")
+            elif evt.num == 5 or evt.delta < 0:
+                canvas.yview_scroll(1, "units")
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)   # Windows
+        canvas.bind_all("<Button-4>", _on_mousewheel)     # Linux
+        canvas.bind_all("<Button-5>", _on_mousewheel)     # Linux
+
+        # --- A PARTIR DE AQUÍ, USA self.body COMO PARENT ---
         # Panel formulario
-        form = tk.LabelFrame(self, text="Registrar Venta", bg=BRAND_PALETTE["panel"], fg=BRAND_PALETTE["text"], bd=0)
+        form = tk.LabelFrame(self.body, text="Registrar Venta",
+                            bg=BRAND_PALETTE["panel"], fg=BRAND_PALETTE["text"], bd=0)
         form.pack(fill="x", padx=10, pady=8)
 
         for col in (1, 3, 5, 7):
@@ -185,9 +241,56 @@ class VentasFrame(tk.Frame):
                   relief="flat", padx=10, pady=6, command=lambda: self._do_sale(print_ticket=True))\
             .grid(row=5, column=4, columnspan=4, pady=8, sticky="w")
 
+# ---- Carrito (venta multi-producto) ----
+        carrito_box = tk.LabelFrame(self.body, text="Carrito (venta con varios productos)",
+                                    bg=BRAND_PALETTE["panel"], fg=BRAND_PALETTE["text"], bd=0)
+        carrito_box.pack(fill="both", expand=False, padx=10, pady=(0, 8))
+
+        cols_cart = ("Producto", "Modo", "Kilos", "Unidades", "Cajas", "Precio", "Importe", "ProductoID")
+
+        cart_panel = tk.Frame(carrito_box, bg=BRAND_PALETTE["panel"])
+        cart_panel.pack(fill="x", expand=False, padx=8, pady=(6, 2))
+
+        self.tree_cart, cart_sx, cart_sy = self._tree_with_scrolls(cart_panel, cols_cart)
+        self.tree_cart.config(height=6)
+
+        for col, w, anchor in (
+            ("Producto", 200, "w"),
+            ("Modo", 90, "center"),
+            ("Kilos", 90, "e"),
+            ("Unidades", 90, "e"),
+            ("Cajas", 90, "e"),
+            ("Precio", 100, "e"),
+            ("Importe", 110, "e"),
+            ("ProductoID", 0, "center"),
+        ):
+            self.tree_cart.heading(col, text=col)
+            self.tree_cart.column(col, width=w, anchor=anchor, stretch=(col in ("Producto",)))
+
+        # barra de acciones del carrito
+        bar = tk.Frame(carrito_box, bg=BRAND_PALETTE["panel"])
+        bar.pack(fill="x", padx=8, pady=(0, 8))
+        tk.Button(bar, text="Agregar al carrito", command=self._cart_add_from_form,
+                bg=BRAND_PALETTE["primary"], fg=BRAND_PALETTE["text"], relief="flat", padx=10, pady=6)\
+            .pack(side="left", padx=(0, 6))
+        tk.Button(bar, text="Quitar seleccionado", command=self._cart_remove_selected,
+                bg=BRAND_PALETTE["bg"], fg=BRAND_PALETTE["link"], relief="flat", padx=10, pady=6)\
+            .pack(side="left", padx=(0, 6))
+        tk.Button(bar, text="Vaciar carrito", command=self._cart_clear,
+                bg=BRAND_PALETTE["bg"], fg=BRAND_PALETTE["link"], relief="flat", padx=10, pady=6)\
+            .pack(side="left", padx=(0, 6))
+
+        self.lbl_cart_total = tk.Label(bar, text="Total carrito: $0.00",
+                                    bg=BRAND_PALETTE["panel"], fg=BRAND_PALETTE["text"])
+        self.lbl_cart_total.pack(side="right", padx=6)
+
+        tk.Button(bar, text="Registrar venta (carrito)", command=lambda: self._finalize_cart_sale(print_ticket=True),
+                bg=BRAND_PALETTE["success"], fg=BRAND_PALETTE["text"], relief="flat", padx=10, pady=6)\
+            .pack(side="right", padx=6)
+
         # ---- Filtro/Busqueda ----
-        filtro = tk.Frame(self, bg=BRAND_PALETTE["panel"])
-        filtro.pack(fill="x", padx=10, pady=(2, 0))
+        filtro = tk.Frame(self.body, bg=BRAND_PALETTE["panel"])
+        filtro.pack(fill="x", padx=10, pady=(5, 0))
         tk.Label(filtro, text="Buscar (producto/cliente/tipo/fecha):",
                  bg=BRAND_PALETTE["panel"], fg=BRAND_PALETTE["text"])\
             .pack(side="left", padx=(6, 6))
@@ -203,8 +306,9 @@ class VentasFrame(tk.Frame):
                   command=lambda: (self.ent_buscar.delete(0, tk.END), self._load_sales()))\
             .pack(side="left", padx=6)
 
+
         # ---- Tabla ----
-        tabla_panel = tk.Frame(self, bg=BRAND_PALETTE["panel"])
+        tabla_panel = tk.Frame(self.body, bg=BRAND_PALETTE["panel"])
         tabla_panel.pack(fill="both", expand=True, padx=10, pady=8)
 
         columnas = ("ID", "Fecha", "Estado", "Producto", "Modo", "Cantidad", "Precio", "Total", "Tipo", "Cliente")
@@ -273,6 +377,10 @@ class VentasFrame(tk.Frame):
                 cur.execute("PRAGMA table_info(productos)")
                 pcols = {r[1].lower() for r in cur.fetchall()}
                 self._productos_has_unidades = "unidades" in pcols
+                
+                # ... ya tienes otras PRAGMAs arriba
+                cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='venta_items'")
+                self._has_venta_items = cur.fetchone() is not None
                 # clientes: deuda_total
                 cur.execute("PRAGMA table_info(clientes)")
                 ccols = {r[1].lower() for r in cur.fetchall()}
@@ -281,6 +389,7 @@ class VentasFrame(tk.Frame):
             self._ventas_has_estado = False
             self._ventas_has_eventos = False
             self._productos_has_unidades = False
+            self._has_venta_items = False
             self._clientes_has_deuda = False
 
     def _load_catalogs(self):
@@ -309,6 +418,10 @@ class VentasFrame(tk.Frame):
     # ---------------------------
     def _on_producto_change(self, event=None):
         self._refresh_producto_info()
+        # si no es manual, al cambiar de producto refrescamos el precio del modo
+        if (self.precio_mode.get() or "").lower() in ("mayoreo", "menudeo"):
+            self._set_precio_from_mode()
+
 
     def _refresh_producto_info(self):
         nombre = self.combo_producto.get()
@@ -337,22 +450,24 @@ class VentasFrame(tk.Frame):
             )
 
             # Autorellenar precio si el modo no es manual
-            if self.precio_mode.get() in ("mayoreo", "menudeo"):
-                valor = pmay if self.precio_mode.get() == "mayoreo" else pmen
-                self.ent_precio.config(state="normal")
-                self.ent_precio.delete(0, tk.END)
-                self.ent_precio.insert(0, f"{redondear_dos_decimales(valor):.2f}")
-                self.ent_precio.config(state="disabled")
         except Exception as e:
             messagebox.showerror("Error", f"No se pudo obtener la info del producto.\n{e}")
 
     def _on_precio_mode_change(self):
-        modo = self.precio_mode.get()
+        """
+        - manual: deja editable y NO toca el valor.
+        - mayoreo/menudeo: carga desde BD, escribe limpio y bloquea el Entry.
+        """
+        modo = (self.precio_mode.get() or "").lower()
         if modo == "manual":
-            self.ent_precio.config(state="normal")
+            # desbloquear para permitir edición manual
+            try:
+                self.ent_precio.configure(state="normal")
+            except Exception:
+                pass
             return
-        self._refresh_producto_info()
-        self.ent_precio.config(state="disabled")
+        self._set_precio_from_mode()
+
 
     def _toggle_credito(self):
         estado = "readonly" if self.var_credito.get() else "disabled"
@@ -371,6 +486,70 @@ class VentasFrame(tk.Frame):
         if proposed == "":
             return True
         return proposed.isdigit()
+    
+    def _set_entry_value(self, entry: tk.Entry, text: str, lock: bool = False):
+        """
+        Escribe 'text' en un Entry evitando que el validador impida borrar/insertar.
+        Si lock=True, deja el Entry en estado 'disabled' al final.
+        """
+        try:
+            # Guardar estado/validación actuales
+            prev_state = entry.cget("state")
+            prev_validate = entry.cget("validate")
+
+            # Deshabilitar validación momentáneamente y habilitar edición
+            entry.configure(validate="none")
+            entry.configure(state="normal")
+
+            entry.delete(0, tk.END)
+            entry.insert(0, text)
+
+            # Restaurar validación
+            entry.configure(validate=prev_validate)
+
+            # Bloquear si aplica
+            entry.configure(state="disabled" if lock else "normal")
+        except Exception:
+            # Fallback muy conservador
+            entry.configure(state="normal")
+            entry.delete(0, tk.END)
+            entry.insert(0, text)
+            entry.configure(state="disabled" if lock else "normal")
+
+    def _set_precio_from_mode(self):
+        """
+        Rellena self.ent_precio según el modo (mayoreo/menudeo) y BLOQUEA el Entry.
+        Limpia el contenido sin que el validador lo impida.
+        """
+        modo = (self.precio_mode.get() or "").lower()
+        if modo == "manual":
+            # nada que hacer
+            try:
+                self.ent_precio.configure(state="normal")
+            except Exception:
+                pass
+            return
+
+        nombre = self.combo_producto.get().strip()
+        if not nombre:
+            return
+
+        try:
+            with get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT precio_mayoreo, precio_menudeo FROM productos WHERE nombre = ?", (nombre,))
+                row = cur.fetchone()
+            if not row:
+                return
+            pmay = float(row[0] or 0.0)
+            pmen = float(row[1] or 0.0)
+            valor = pmay if modo == "mayoreo" else pmen
+
+            self._set_entry_value(self.ent_precio, f"{redondear_dos_decimales(valor):.2f}", lock=True)
+        except Exception as e:
+            messagebox.showerror("Precio", f"No se pudo cargar el precio de {modo}.\n{e}")
+
+
 
     # ---------------------------
     # Acción principal: vender
@@ -563,6 +742,212 @@ class VentasFrame(tk.Frame):
         except Exception as e:
             messagebox.showerror("Error", f"No se pudo registrar la venta.\n{e}")
     
+    def _cart_repaint(self):
+        # refresca la tabla y el total
+        for iid in self.tree_cart.get_children():
+            self.tree_cart.delete(iid)
+        total = 0.0
+        for it in self._cart:
+            total += float(it["importe"] or 0.0)
+            self.tree_cart.insert("", "end", values=(
+                it["producto_nombre"],
+                it["modo"],
+                f"{redondear_dos_decimales(it['kilos']):.2f}",
+                str(int(it["unidades"] or 0)),
+                f"{redondear_dos_decimales(it['num_cajas']):.2f}",
+                formato_moneda(redondear_dos_decimales(it["precio"])),
+                formato_moneda(redondear_dos_decimales(it["importe"])),
+                it["producto_id"]
+            ))
+        self.lbl_cart_total.config(text=f"Total carrito: {formato_moneda(redondear_dos_decimales(total))}")
+
+    def _cart_add_from_form(self):
+        """Toma los campos del formulario actual y los agrega al carrito (no toca BD aún)."""
+        nombre = self.combo_producto.get().strip()
+        if not nombre:
+            messagebox.showwarning("Producto", "Selecciona un producto"); return
+        producto_id = self.productos.get(nombre)
+        if not producto_id:
+            messagebox.showerror("Error", "Producto no encontrado."); return
+
+    # Determina modalidad y cantidades igual que _do_sale
+        unidades_txt = self.ent_unidades.get().strip()
+        cajas_txt    = self.ent_cajas.get().strip()
+        kilos_txt    = self.ent_kilos.get().strip()
+        modalidad = None
+        unidades = 0
+        cajas = 0.0
+        kilos = 0.0
+        try:
+            if unidades_txt:
+                if not self._productos_has_unidades:
+                    messagebox.showerror("No disponible", "La BD no soporta venta por unidades.")
+                    return
+                unidades = int(unidades_txt); 
+                if unidades <= 0: raise ValueError
+                modalidad = "UNIDADES"
+            elif cajas_txt:
+                cajas = to_float(cajas_txt, permitir_cero=False)
+                modalidad = "CAJAS→KILOS"
+            elif kilos_txt:
+                kilos = to_float(kilos_txt, permitir_cero=False)
+                modalidad = "KILOS"
+            else:
+                messagebox.showerror("Error", "Ingresa Unidades, Cajas o Kilos."); return
+        except Exception:
+            messagebox.showerror("Error", "Cantidad inválida."); return
+
+        try:
+            precio = to_float(self.ent_precio.get(), permitir_cero=False)
+        except Exception:
+            messagebox.showerror("Error", "Precio inválido."); return
+
+        # Obtener peso_caja para convertir si es CAJAS→KILOS
+        peso_caja = 0.0
+        try:
+            with get_connection() as conn:
+                r = conn.execute("SELECT peso_caja FROM productos WHERE id=?", (producto_id,)).fetchone()
+                peso_caja = float(r[0] or 0.0) if r else 0.0
+        except Exception:
+            peso_caja = 0.0
+
+        num_cajas = 0.0
+        if modalidad == "CAJAS→KILOS":
+            if peso_caja <= 0:
+                messagebox.showerror("Error", "No se puede usar CAJAS sin 'peso_caja'."); return
+            kilos = redondear_dos_decimales(cajas * peso_caja)
+            num_cajas = redondear_dos_decimales(cajas)
+        elif modalidad == "UNIDADES":
+            pass
+        else:  # KILOS
+            kilos = redondear_dos_decimales(kilos)
+
+        importe = 0.0
+        if modalidad == "UNIDADES":
+            importe = redondear_dos_decimales(unidades * precio)
+        else:
+            importe = redondear_dos_decimales(kilos * precio)
+
+        self._cart.append({
+            "producto_id": int(producto_id),
+            "producto_nombre": nombre,
+            "modo": modalidad,
+            "kilos": float(kilos or 0.0),
+            "unidades": int(unidades or 0),
+            "num_cajas": float(num_cajas or 0.0),
+            "precio": float(precio),
+            "importe": float(importe),
+        })
+        self._cart_repaint()
+        # limpiar campos (conserva precio si no es manual)
+        self._clear_form(keep_price=(self.precio_mode.get() != "manual"))
+
+    def _cart_remove_selected(self):
+        sel = self.tree_cart.selection()
+        if not sel:
+            return
+        # eliminamos por índice visual
+        # mapeamos a (producto_id, kilos, unidades, precio, importe) para distinguir
+        vals = self.tree_cart.item(sel[0], "values")
+        key = (int(vals[7]), float(vals[2]), int(vals[3]), float(vals[5].replace("$","").replace(",","")))
+        # busca el primero que coincida
+        for i, it in enumerate(self._cart):
+            k = (it["producto_id"], round(it["kilos"],2), int(it["unidades"]), round(it["precio"],2))
+            if k == key:
+                self._cart.pop(i); break
+        self._cart_repaint()
+
+    def _cart_clear(self):
+        self._cart.clear()
+        self._cart_repaint()
+
+    def _finalize_cart_sale(self, print_ticket: bool = True):
+        """Persistir carrito completo como UNA venta con N items."""
+        if not self._cart:
+            messagebox.showinfo("Carrito", "No hay productos en el carrito."); return
+        if not self._has_venta_items:
+            messagebox.showerror("Carrito", "La tabla 'venta_items' no existe. Ejecuta la migración."); return
+
+        tipo_venta = "credito" if self.var_credito.get() else "contado"
+        cliente_id = None
+        if tipo_venta == "credito":
+            cli_nombre = self.combo_cliente.get()
+            if cli_nombre not in self.clientes:
+                messagebox.showerror("Cliente", "Selecciona un cliente válido"); return
+            cliente_id = self.clientes[cli_nombre]
+
+        # Validar stock por ítem ANTES de tocar BD
+        try:
+            with get_connection() as conn:
+                cur = conn.cursor()
+                stock_map = {}
+                # precarga stocks
+                for it in self._cart:
+                    pid = it["producto_id"]
+                    if pid not in stock_map:
+                        if self._productos_has_unidades:
+                            cur.execute("SELECT kilos, unidades FROM productos WHERE id=?", (pid,))
+                            r = cur.fetchone()
+                            stock_map[pid] = (float(r[0] or 0.0), int(r[1] or 0))
+                        else:
+                            cur.execute("SELECT kilos FROM productos WHERE id=?", (pid,))
+                            r = cur.fetchone()
+                            stock_map[pid] = (float(r[0] or 0.0), None)
+                # verificar
+                for it in self._cart:
+                    pid = it["producto_id"]
+                    sk_k, sk_u = stock_map[pid]
+                    if it["unidades"] > 0:
+                        if sk_u is None or it["unidades"] > sk_u:
+                            raise ValueError(f"Stock insuficiente de unidades para {it['producto_nombre']}")
+                    if it["kilos"] > 0:
+                        if it["kilos"] > sk_k:
+                            raise ValueError(f"Stock insuficiente de kilos para {it['producto_nombre']}")
+        except Exception as e:
+            messagebox.showerror("Stock", str(e)); return
+        # Persistencia
+        try:
+            with get_connection() as conn:
+                cur = conn.cursor()
+                fecha_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                total_venta = sum(float(it["importe"] or 0.0) for it in self._cart)
+                # encabezado en 'ventas'
+                extra_cols = ", estado" if self._ventas_has_estado else ""
+                extra_vals = ", 'ACTIVA'" if self._ventas_has_estado else ""
+                cur.execute(f"""
+                    INSERT INTO ventas (producto_id, kilos, num_cajas, unidades, precio, total, tipo_venta, cliente_id, fecha{extra_cols})
+                    VALUES (NULL, 0, 0, 0, 0, ?, ?, ?, ?{extra_vals})
+                """, (float(total_venta), tipo_venta, cliente_id, fecha_str))
+                venta_id = cur.lastrowid
+                # detalle en 'venta_items' + actualización de stock
+                for it in self._cart:
+                    cur.execute("""
+                        INSERT INTO venta_items
+                        (venta_id, producto_id, kilos, unidades, num_cajas, precio, importe)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """, (int(venta_id), int(it["producto_id"]), float(it["kilos"]), int(it["unidades"]),
+                        float(it["num_cajas"]), float(it["precio"]), float(it["importe"])))
+                    # stock
+                    if it["unidades"] > 0 and self._productos_has_unidades:
+                        cur.execute("UPDATE productos SET unidades = unidades - ? WHERE id = ?", (int(it["unidades"]), int(it["producto_id"])))
+                    if it["kilos"] > 0:
+                        cur.execute("UPDATE productos SET kilos = kilos - ? WHERE id = ?", (float(it["kilos"]), int(it["producto_id"])))
+                # deuda cliente si crédito
+                if self._clientes_has_deuda and tipo_venta == "credito" and cliente_id:
+                    cur.execute("UPDATE clientes SET deuda_total = deuda_total + ? WHERE id = ?", (float(total_venta), int(cliente_id)))
+            # limpiar UI
+            self._cart_clear()
+            self._load_sales(self.ent_buscar.get().strip())
+            self._refresh_producto_info()
+            messagebox.showinfo("Éxito", "Venta registrada (carrito).")
+
+            if print_ticket:
+                self._imprimir_ticket(venta_id=venta_id, reimpresion=False)
+
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo registrar la venta del carrito.\n{e}")
+
+    
     def _load_sales(self, filtro: str = ""):
         self.tree.delete(*self.tree.get_children())
         self._venta_por_iid.clear()
@@ -585,7 +970,7 @@ class VentasFrame(tk.Frame):
                             v.precio, COALESCE(v.total, v.kilos * v.precio) AS total,
                             v.tipo_venta, c.nombre
                         FROM ventas v
-                        JOIN productos p ON p.id = v.producto_id
+                        LEFT JOIN productos p ON p.id = v.producto_id
                         LEFT JOIN clientes c ON c.id = v.cliente_id
                         WHERE p.nombre LIKE ? OR IFNULL(c.nombre,'') LIKE ? OR IFNULL(v.tipo_venta,'') LIKE ? OR DATE(v.fecha) LIKE ?
                         ORDER BY v.fecha DESC
@@ -666,7 +1051,6 @@ class VentasFrame(tk.Frame):
         usuario_col  = "usuario" if "usuario" in cols else None
         fecha_col    = "fecha" if "fecha" in cols else None
         tipo_col     = "tipo" if "tipo" in cols else None
-
         # --- Normalización del TIPO para cumplir el CHECK ---
         a = (accion or "").strip().lower()
         # mapa de acciones -> valores válidos del CHECK
@@ -683,7 +1067,6 @@ class VentasFrame(tk.Frame):
         }
         tipo_val = tipo_map.get(a, "CREADA")
         # -----------------------------------------------
-
         fields, values = [], []
         if venta_id_col:
             fields.append(venta_id_col); values.append(int(venta_id))
@@ -711,7 +1094,6 @@ class VentasFrame(tk.Frame):
         if not data:
             messagebox.showinfo("Cancelar", "Selecciona una venta en la tabla.")
             return
-
         # Evita doble cancelación (robusto en MAYÚSCULAS)
         if self._ventas_has_estado and str(data.get("estado", "")).strip().upper() == "CANCELADA":
             messagebox.showinfo("Cancelar", "La venta ya está cancelada.")
@@ -739,13 +1121,11 @@ class VentasFrame(tk.Frame):
                 unidades   = int(unidades or 0)
                 total      = float(total or 0.0)
                 tipo_venta = (tipo_venta or "").lower()
-
                 # Revertir inventario
                 if unidades > 0:
                     cur.execute("UPDATE productos SET unidades = unidades + ? WHERE id = ?", (unidades, producto_id))
                 if kilos > 0:
                     cur.execute("UPDATE productos SET kilos = kilos + ? WHERE id = ?", (kilos, producto_id))
-
                 # Marcar cancelación
                 if self._ventas_has_estado:
                     fecha_cancel = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -757,12 +1137,10 @@ class VentasFrame(tk.Frame):
                         """, (fecha_cancel, motivo, data["id"]))
                     except Exception:
                         cur.execute("UPDATE ventas SET estado = 'CANCELADA' WHERE id = ?", (data["id"],))
-
                 # Ajustar deuda si fue a crédito
                 if self._clientes_has_deuda and (tipo_venta == "credito") and (cliente_id is not None):
                     cur.execute("UPDATE clientes SET deuda_total = deuda_total - ? WHERE id = ?",
                                 (total, int(cliente_id)))
-
                 # Auditoría adaptable
                 if self._ventas_has_eventos:
                     import json
@@ -788,7 +1166,6 @@ class VentasFrame(tk.Frame):
         if self._ventas_has_estado and str(data.get("estado", "")).strip().upper() == "CANCELADA":
             messagebox.showinfo("Modificar", "No se puede modificar una venta cancelada.")
             return
-
         # Editor simple (cantidad, precio, tipo contado/credito)
         edit = tk.Toplevel(self)
         edit.title(f"Modificar venta #{data['id']}")
@@ -851,7 +1228,6 @@ class VentasFrame(tk.Frame):
                     ok_unid   = int(ok_unidades or 0)
                     ok_total  = float(ok_total or 0.0)
                     ok_precio = float(ok_precio or 0.0)
-
                     # Stock actual
                     if self._productos_has_unidades:
                         cur.execute("SELECT kilos, unidades FROM productos WHERE id = ?", (producto_id,))
@@ -885,13 +1261,11 @@ class VentasFrame(tk.Frame):
                         )
                         cur.execute("UPDATE productos SET kilos = kilos - ? WHERE id = ?", (diff_k, producto_id))
                         total_nuevo = float(cant * pre)
-
                     # Ajuste de deuda si corresponde
                     if self._clientes_has_deuda and (ok_tipo == "credito" or tipo_var.get() == "credito") and cliente_id:
                         ajuste = float(total_nuevo) - ok_total
                         cur.execute("UPDATE clientes SET deuda_total = deuda_total + ? WHERE id = ?",
                                     (ajuste, int(cliente_id)))
-
                     # Auditoría adaptable
                     if self._ventas_has_eventos:
                         import json
@@ -967,7 +1341,6 @@ class VentasFrame(tk.Frame):
 
         for c in columnas:
             tree.heading(c, text=c, command=lambda cc=c: sort_by(cc))
-
     # ---------------------------
     # Menú contextual / acciones
     # ---------------------------
@@ -985,70 +1358,30 @@ class VentasFrame(tk.Frame):
         data = self._venta_por_iid.get(iid)
         return iid, data
 
-def _abrir_archivo_con_sistema(path):
-    """Abre un archivo con el manejador por defecto (evita forzar Chrome)."""
-    try:
-        if shutil.which("gio"):
-            subprocess.Popen(["gio", "open", path])
-            return True
-        if shutil.which("xdg-open"):
-            subprocess.Popen(["xdg-open", path])
-            return True
-    except Exception:
-        pass
-    # Fallback: navegador por defecto
-    try:
-        webbrowser.open("file://" + os.path.abspath(path))
-        return True
-    except Exception:
-        return False
-
-def imprimir_ticket_html(path_html, printer_name=None, ancho_mm=80, alto_mm=None):
-    """
-    Imprime un ticket HTML sin depender de Chrome:
-
-    1) Si hay wkhtmltopdf + lp: convierte a PDF y manda a CUPS.
-       - Para térmicas 80mm: usa --page-width 80mm; alto dinámico (si alto_mm=None).
-    2) Si falta algo, abre el HTML con el manejador del sistema (gio/xdg-open).
-
-    :param path_html: ruta del HTML ya generado.
-    :param printer_name: nombre de impresora CUPS (lpstat -p -d) o None para la predeterminada.
-    :param ancho_mm: ancho del papel (típico 80 o 58 mm).
-    :param alto_mm: alto fijo en mm; si None, se deja “infinito” (wkhtmltopdf calcula).
-    """
-    path_html = os.path.abspath(path_html)
-
-    if shutil.which("wkhtmltopdf") and shutil.which("lp"):
+    def _imprimir_ticket(self, venta_id: int | None = None, reimpresion: bool = True):
+        """Intenta imprimir ticket usando ui.tickets si existe."""
         try:
-            fd, pdf_path = tempfile.mkstemp(suffix=".pdf"); os.close(fd)
-
-            # Construir argumentos de tamaño para tickets térmicos
-            size_args = ["--page-width", f"{ancho_mm}mm"]
-            if alto_mm:
-                size_args += ["--page-height", f"{alto_mm}mm"]
-            else:
-                # Márgenes mínimos para térmica
-                size_args += ["--margin-top", "3mm", "--margin-bottom", "3mm",
-                              "--margin-left", "3mm", "--margin-right", "3mm"]
-
-            # HTML -> PDF silencioso
-            subprocess.run(
-                ["wkhtmltopdf", "--quiet", *size_args, path_html, pdf_path],
-                check=True
+            from ui import tickets  # type: ignore
+        except Exception:
+            messagebox.showinfo("Ticket", "El módulo de tickets aún no está disponible.")
+            return
+        try:
+            if venta_id is None:
+                # Si no se pasa, usar la venta seleccionada
+                _iid, data = self._selected_sale()
+                if not data:
+                    messagebox.showinfo("Ticket", "Selecciona una venta.")
+                    return
+                venta_id = data["id"]
+            tickets.imprimir_ticket(
+                int(venta_id),
+                reimpresion=reimpresion,
+                abrir_archivo=False,     # no abrir visor
+                print_direct=True        # mandar a impresora (lp)
+                # , printer_name="NOMBRE_DE_TU_IMPRESORA"  # opcional
             )
-
-            # Enviar a impresora
-            lp_cmd = ["lp", pdf_path]
-            if printer_name:
-                lp_cmd.extend(["-d", printer_name])
-            subprocess.run(lp_cmd, check=True)
-            return True
         except Exception as e:
-            print(f"[print] wkhtmltopdf/lp falló: {e}")
-
-    # Fallback: abrir el HTML con el sistema (visión previa manual)
-    return _abrir_archivo_con_sistema(path_html)
-
+            messagebox.showerror("Ticket", f"No se pudo generar el ticket.\n{e}")
     # ---------------------------
     # UX helpers
     # ---------------------------
@@ -1083,14 +1416,13 @@ def imprimir_ticket_html(path_html, printer_name=None, ancho_mm=80, alto_mm=None
                 self.ent_kilos.insert(0, f"{redondear_dos_decimales(data['kilos']):.2f}")
         else:  # KILOS
             self.ent_kilos.insert(0, f"{redondear_dos_decimales(data['kilos']):.2f}")
-
         # Precio: lo ponemos manual con el precio usado
         self.precio_mode.set("manual")
         self._on_precio_mode_change()
+        self._set_entry_value(self.ent_precio, f"{redondear_dos_decimales(data['precio']):.2f}", lock=False)
         self.ent_precio.config(state="normal")
         self.ent_precio.delete(0, tk.END)
         self.ent_precio.insert(0, f"{redondear_dos_decimales(data['precio']):.2f}")
-
         # Crédito / cliente
         if (data["tipo"] or "").lower() == "credito":
             self.var_credito.set(True)
@@ -1106,7 +1438,6 @@ def imprimir_ticket_html(path_html, printer_name=None, ancho_mm=80, alto_mm=None
         else:
             self.var_credito.set(False)
             self._toggle_credito()
-
         # Focus cómodo
         if data["modo"] == "UNIDADES":
             self.ent_unidades.focus_set()
@@ -1149,25 +1480,33 @@ def imprimir_ticket_html(path_html, printer_name=None, ancho_mm=80, alto_mm=None
         self.bind_all("<Control-f>", lambda e: (self.ent_buscar.focus_set(),
                                                 self.ent_buscar.select_range(0, tk.END)))
         self.bind_all("<Escape>", self._on_escape)
-
     # ---------------------------
     # Infra de tabla y scrolls
     # ---------------------------
     def _tree_with_scrolls(self, parent, columnas):
-        scroll_y = ttk.Scrollbar(parent, orient="vertical")
-        scroll_x = ttk.Scrollbar(parent, orient="horizontal")
+        wrapper = tk.Frame(parent, bg=BRAND_PALETTE["panel"])
+        wrapper.pack(fill="both", expand=True)
+
+        # Widgets
         tree = ttk.Treeview(
-            parent, columns=columnas, show="headings", height=14, style="Brand.Treeview",
-            yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set
+            wrapper, columns=columnas, show="headings", height=14, style="Brand.Treeview"
         )
-        scroll_y.config(command=tree.yview)
-        scroll_x.config(command=tree.xview)
+        scroll_y = ttk.Scrollbar(wrapper, orient="vertical", command=tree.yview)
+        scroll_x = ttk.Scrollbar(wrapper, orient="horizontal", command=tree.xview)
+        tree.configure(yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
 
-        tree.pack(fill="both", expand=True)
-        scroll_x.pack(fill="x")
-        scroll_y.place(relx=1.0, rely=0.0, relheight=1.0, anchor="ne")
+        # Layout con grid (barras pegadas al árbol)
+        wrapper.grid_rowconfigure(0, weight=1)
+        wrapper.grid_columnconfigure(0, weight=1)
+
+        tree.grid(row=0, column=0, sticky="nsew")  # árbol ocupa todo
+        scroll_y.grid(row=0, column=1, sticky="ns")  # a la derecha
+        scroll_x.grid(row=1, column=0, sticky="ew")  # abajo
+
+        # Esquina inferior derecha para que no quede hueco (opcional)
+        tk.Frame(wrapper, width=1, height=1, bg=BRAND_PALETTE["panel"]).grid(row=1, column=1)
+
         return tree, scroll_x, scroll_y
-
 
 # -----------------------------------------------------------
 # Punto de entrada para main.py
