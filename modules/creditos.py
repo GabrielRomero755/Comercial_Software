@@ -34,6 +34,8 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk, messagebox
 
+from .calendar_widget import CalendarioWidget
+
 from db.database import get_connection
 from ui.helpers import (
     redondear_dos_decimales,
@@ -144,8 +146,16 @@ class CreditosFrame(tk.Frame):
         return cb
 
     def _tree_with_scrolls(self, parent, columnas, height=12):
+        # Asegura que el contenedor permita expandir el Treeview
+        try:
+            parent.grid_rowconfigure(0, weight=1)
+            parent.grid_columnconfigure(0, weight=1)
+        except Exception:
+            pass
+
         scroll_y = ttk.Scrollbar(parent, orient="vertical", style="Vertical.TScrollbar")
         scroll_x = ttk.Scrollbar(parent, orient="horizontal", style="Horizontal.TScrollbar")
+
         tree = ttk.Treeview(
             parent,
             columns=columnas,
@@ -157,10 +167,22 @@ class CreditosFrame(tk.Frame):
         )
         scroll_y.config(command=tree.yview)
         scroll_x.config(command=tree.xview)
+
+        # Grid del arbol y scrollbars
         tree.grid(row=0, column=0, sticky="nsew")
         scroll_y.grid(row=0, column=1, sticky="ns")
         scroll_x.grid(row=1, column=0, sticky="ew")
+
+        # Filler en la esquina para evitar el "huevito" vacío
+        try:
+            corner = tk.Frame(parent, bg=PALETTE.get("panel", parent.cget("bg")), width=10, height=10)
+            corner.grid(row=1, column=1, sticky="nsew")
+            corner.grid_propagate(False)
+        except Exception:
+            pass
+
         return tree
+
 
     # -------------------------------------------------------
     # Descubrimiento de esquema
@@ -714,26 +736,46 @@ class CreditosFrame(tk.Frame):
         # Fila de filtros
         filt = tk.Frame(wrapper, bg=PALETTE["panel"])
         filt.grid(row=0, column=0, sticky="ew", pady=(6, 2))
-        for c in range(8):
-            filt.grid_columnconfigure(c, weight=(1 if c in (1, 4, 7) else 0))
 
-        tk.Label(filt, text="Cliente:", bg=PALETTE["panel"], fg=PALETTE["text"]).grid(row=0, column=0, padx=6, pady=4, sticky="e")
+        # Aumentamos columnas para alojar dos botones 📅 y el botón Recargar al final
+        for c in range(10):
+            # damos peso a columnas de combobox, a las entradas y al final
+            filt.grid_columnconfigure(c, weight=(1 if c in (1, 4, 7, 9) else 0))
+
+        tk.Label(filt, text="Cliente:", bg=PALETTE["panel"], fg=PALETTE["text"])\
+        .grid(row=0, column=0, padx=6, pady=4, sticky="e")
+
         self.cb_cliente = ttk.Combobox(filt, state="readonly", width=28)
         self.cb_cliente.grid(row=0, column=1, padx=4, pady=4, sticky="we")
         self.cb_cliente.bind("<<ComboboxSelected>>", lambda _e: self._recargar_panel_creditos())
 
-        def _dlabel(p, t, r, c): 
-            tk.Label(p, text=t, bg=PALETTE["panel"], fg=PALETTE["text"]).grid(row=r, column=c, padx=6, pady=4, sticky="e")
+        def _dlabel(p, t, r, c):
+            tk.Label(p, text=t, bg=PALETTE["panel"], fg=PALETTE["text"])\
+            .grid(row=r, column=c, padx=6, pady=4, sticky="e")
 
         _dlabel(filt, "Desde:", 0, 3)
         self.desde_entry = ttk.Entry(filt, width=12)
-        self.desde_entry.grid(row=0, column=4, padx=4, pady=4, sticky="w")
-        _dlabel(filt, "Hasta:", 0, 5)
+        self.desde_entry.grid(row=0, column=4, padx=4, pady=4, sticky="we")
+
+        # Botón calendario para "Desde"
+        ttk.Button(
+            filt, text="📅", width=3, style="TButton",
+            command=lambda: self._popup_calendario(self.desde_entry, fuentes=("all",))
+        ).grid(row=0, column=5, padx=(2, 8), pady=4, sticky="w")
+
+        _dlabel(filt, "Hasta:", 0, 6)
         self.hasta_entry = ttk.Entry(filt, width=12)
-        self.hasta_entry.grid(row=0, column=6, padx=4, pady=4, sticky="w")
+        self.hasta_entry.grid(row=0, column=7, padx=4, pady=4, sticky="we")
+
+        # Botón calendario para "Hasta"
+        ttk.Button(
+            filt, text="📅", width=3, style="TButton",
+            command=lambda: self._popup_calendario(self.hasta_entry, fuentes=("all",))
+        ).grid(row=0, column=8, padx=(2, 8), pady=4, sticky="w")
 
         ttk.Button(filt, text="Recargar", style="TButton", command=self._recargar_panel_creditos)\
-            .grid(row=0, column=7, padx=8, pady=4, sticky="w")
+        .grid(row=0, column=9, padx=8, pady=4, sticky="e")
+
 
         # Quick ranges
         q = tk.Frame(wrapper, bg=PALETTE["panel"])
@@ -744,14 +786,19 @@ class CreditosFrame(tk.Frame):
 
         # Split en dos tablas
         split = tk.Frame(wrapper, bg=PALETTE["panel"])
-        split.grid(row=2, column=0, sticky="nsew")
-        split.grid_columnconfigure(0, weight=1)
-        split.grid_columnconfigure(1, weight=1)
+        split.grid(row=2, column=0, sticky="nsew", padx=0, pady=0)
+
+        # Ambas columnas con el mismo "uniform" para 50/50 real
+        split.grid_columnconfigure(0, weight=1, uniform="splitcols")
+        split.grid_columnconfigure(1, weight=1, uniform="splitcols")
         split.grid_rowconfigure(0, weight=1)
 
-        # Ventas
+        # Ventas (izquierda)
         left = tk.LabelFrame(split, text="Ventas a crédito", bg=PALETTE["panel"], fg=PALETTE["text"], bd=0)
-        left.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 6), pady=0)
+        left.grid_rowconfigure(0, weight=1)     # <- estira el tree
+        left.grid_columnconfigure(0, weight=1)  # <- estira el tree
+
         cols_v = ("Fecha", "Producto", "Cantidad", "Total", "Saldo", "Estatus", "VentaID")
         self.tree_compras = self._tree_with_scrolls(left, cols_v, height=10)
         for col, w, anchor in (
@@ -764,13 +811,15 @@ class CreditosFrame(tk.Frame):
             ("VentaID", 70, "center"),
         ):
             self.tree_compras.heading(col, text=col)
+            # Permite que "Producto" estire para ocupar sobrante
             self.tree_compras.column(col, width=w, anchor=anchor, stretch=(col in ("Producto",)))
-        self.tree_compras.bind("<Double-1>", lambda _e: self._ver_pagos_de_venta())
-        self.tree_compras.bind("<Return>",   lambda _e: self._ver_pagos_de_venta())
 
-        # Pagos
+        # Pagos (derecha)
         right = tk.LabelFrame(split, text="Pagos / Abonos", bg=PALETTE["panel"], fg=PALETTE["text"], bd=0)
-        right.grid(row=0, column=1, sticky="nsew", padx=(4, 0))
+        right.grid(row=0, column=1, sticky="nsew", padx=(6, 0), pady=0)
+        right.grid_rowconfigure(0, weight=1)     # <- estira el tree
+        right.grid_columnconfigure(0, weight=1)  # <- estira el tree
+
         cols_p = ("Fecha", "VentaID", "Descripción", "Monto")
         self.tree_pagos = self._tree_with_scrolls(right, cols_p, height=10)
         for col, w, anchor in (
@@ -780,7 +829,9 @@ class CreditosFrame(tk.Frame):
             ("Monto", 110, "e"),
         ):
             self.tree_pagos.heading(col, text=col)
+            # Permite que "Descripción" estire para ocupar sobrante
             self.tree_pagos.column(col, width=w, anchor=anchor, stretch=(col in ("Descripción",)))
+
 
         # Acciones
         actions = tk.Frame(wrapper, bg=PALETTE["panel"])
@@ -825,6 +876,51 @@ class CreditosFrame(tk.Frame):
         self.desde_entry.delete(0, tk.END); self.desde_entry.insert(0, ini)
         self.hasta_entry.delete(0, tk.END); self.hasta_entry.insert(0, d.strftime("%Y-%m-%d"))
         self._recargar_panel_creditos()
+        
+    def _popup_calendario(self, target_entry: ttk.Entry, fuentes=("all",)):
+        """
+        Abre un popup con el CalendarioWidget y, al seleccionar fecha,
+        inserta 'YYYY-MM-DD' en el Entry destino y refresca el panel.
+        """
+        # callback que escribe la fecha en el entry y refresca
+        def _on_date(fecha: str):
+            try:
+                target_entry.delete(0, tk.END)
+                target_entry.insert(0, fecha)
+            except Exception:
+                pass
+            # Actualizar listados automáticamente al elegir fecha
+            self._recargar_panel_creditos()
+
+        top = tk.Toplevel(self)
+        top.title("Selecciona una fecha")
+        try:
+            top.configure(bg=PALETTE["bg"])
+        except Exception:
+            pass
+
+        # Construir el widget
+        cal = CalendarioWidget(top, _on_date, fuentes=fuentes)
+
+        # Si el entry ya tiene una fecha válida, abrir ese mes/año
+        import datetime as _dt
+        txt = (target_entry.get() or "").strip()
+        try:
+            d = _dt.datetime.strptime(txt, "%Y-%m-%d")
+            cal.current_year = d.year
+            cal.current_month = d.month
+            cal.build_calendar()
+        except Exception:
+            pass
+
+        # Asegurar modal suave
+        try:
+            top.transient(self.winfo_toplevel())
+            top.grab_set()
+            top.focus_set()
+        except Exception:
+            pass
+
 
     def _recargar_panel_creditos(self):
         self._load_ventas_cliente()

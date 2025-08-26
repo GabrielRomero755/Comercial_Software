@@ -398,6 +398,9 @@ class InventarioFrame(tk.Frame):
         ttk.Button(barra, text="Abonar a compra seleccionada…", style="Success.TButton",
                 command=self._abonar_compra_seleccionada).pack(side="left", padx=(0,8))
         ttk.Button(barra, text="Ver pagos de la compra", command=self._cargar_pagos_por_deuda).pack(side="left")
+        ttk.Button(barra, text="Editar Abonos", command=self._abrir_crud_abonos)\
+            .pack(side="left", padx=(8,0))
+
         
         # === PROVEEDORES (CRUD) ===
         prov_panel = self._panel(root, pady=8, padx=8, fill="both", expand=False)
@@ -617,25 +620,245 @@ class InventarioFrame(tk.Frame):
                 with get_connection() as conn:
                     cur = conn.cursor()
                     aplica = min(monto, saldo)
+
+                    # 1) Registrar pago CxP
                     cur.execute("""
                         INSERT INTO pagos_proveedores (proveedor_id, deuda_proveedor_id, monto, fecha, descripcion)
                         VALUES (?, ?, ?, ?, ?)
                     """, (int(prov_id), int(deuda_id), float(aplica), fecha_str, desc))
+
+                    # 2) Actualizar saldo de la deuda
                     nuevo_saldo = redondear_dos_decimales(saldo - aplica)
                     cur.execute("UPDATE deudas_proveedores SET saldo = ? WHERE id = ?", (float(nuevo_saldo), int(deuda_id)))
+
+                    # 3) Crear el GASTO correspondiente (enlazar proveedor si la columna existe)
+                    g_cols = {r[1] for r in conn.execute("PRAGMA table_info(gastos)").fetchall()}
+                    cols_g = ["tipo", "monto", "descripcion", "fecha"]
+                    vals_g = ["Abono compra", float(aplica), f"{desc} — Deuda #{deuda_id} — Proveedor {prov_nombre}", fecha_str]
+                    if "proveedor_id" in g_cols:
+                        cols_g.append("proveedor_id"); vals_g.append(int(prov_id))
+                    cur.execute(
+                        f"INSERT INTO gastos ({', '.join(cols_g)}) VALUES ({', '.join('?' for _ in cols_g)})",
+                        tuple(vals_g)
+                    )
+
                 messagebox.showinfo("Éxito", "Abono registrado.")
                 win.destroy()
                 self._cargar_cxp_creditos()
                 self._cargar_pagos_por_deuda()
             except Exception as e:
                 messagebox.showerror("Error", f"No se pudo registrar el abono.\n{e}", parent=win)
+        
+        # --- Botón + atajos + modal seguro ---
+        ttk.Button(win, text="Registrar abono", command=guardar, style="Success.TButton")\
+            .grid(row=4, column=0, columnspan=2, padx=10, pady=(6, 10), sticky="ew")
 
-        ttk.Button(win, text="Guardar", command=guardar, style="Success.TButton")\
-            .grid(row=4, column=0, columnspan=2, pady=10)
+        # atajos
         win.bind("<Return>", lambda _e: guardar())
         win.bind("<Escape>", lambda _e: win.destroy())
-        try: win.grab_set(); ent_monto.focus_set()
-        except Exception: pass        
+
+        # modal seguro
+        win.update_idletasks()
+        try: win.grab_set()
+        except Exception: pass
+        try: win.focus_force()
+        except Exception: pass
+    def _abrir_crud_abonos(self):
+        """Ventana CRUD para pagos_proveedores con ajuste automático del saldo de la deuda vinculada."""
+        win = tk.Toplevel(self)
+        win.title("Pagos / Abonos a Proveedores (CRUD)")
+        try: win.configure(bg=PALETTE["bg"])
+        except Exception: pass
+        win.geometry("900x420")
+        win.transient(self.winfo_toplevel())
+
+        # --- Tabla ---
+        cols = ("ID","Fecha","Proveedor","DeudaID","Descripción","Monto")
+        tree, _, _ = self._tree_with_scrolls(win, cols, height=12)
+        for c,w,a in (("ID",70,"center"),("Fecha",130,"center"),("Proveedor",220,"w"),
+                      ("DeudaID",90,"center"),("Descripción",300,"w"),("Monto",110,"e")):
+            tree.heading(c, text=c)
+            tree.column(c, width=w, anchor=a, stretch=(c in ("Proveedor","Descripción")))
+
+        # detectar columnas reales
+        try:
+            with get_connection() as conn:
+                cur = conn.cursor()
+                pp_cols = {r[1] for r in cur.execute("PRAGMA table_info(pagos_proveedores)").fetchall()}
+                has_prov = "proveedor_id" in pp_cols
+                has_deuda_fk = "deuda_proveedor_id" in pp_cols
+                # cargar
+                if has_prov:
+                    cur.execute("""
+                        SELECT pp.id, pp.fecha, IFNULL(pr.nombre,'(s/d)') AS proveedor,
+                               {did} AS deuda_id, IFNULL(pp.descripcion,''), COALESCE(pp.monto,0)
+                        FROM pagos_proveedores pp
+                        LEFT JOIN proveedores pr ON pr.id = pp.proveedor_id
+                        ORDER BY datetime(pp.fecha) DESC, pp.id DESC
+                    """.format(did=("pp.deuda_proveedor_id" if has_deuda_fk else "NULL")))
+                else:
+                    cur.execute("""
+                        SELECT pp.id, pp.fecha, '(s/d)' AS proveedor,
+                               {did} AS deuda_id, IFNULL(pp.descripcion,''), COALESCE(pp.monto,0)
+                        FROM pagos_proveedores pp
+                        ORDER BY datetime(pp.fecha) DESC, pp.id DESC
+                    """.format(did=("pp.deuda_proveedor_id" if has_deuda_fk else "NULL")))
+                rows = cur.fetchall()
+        except Exception as e:
+            messagebox.showerror("Pagos", f"No se pudieron leer los abonos.\n{e}", parent=win)
+            win.destroy()
+            return
+
+        for pid, fecha, prov, deuda_id, desc, monto in rows:
+            tree.insert("", "end", values=(
+                int(pid),
+                (fecha.split(" ")[0] if fecha else ""),
+                prov or "(s/d)",
+                (int(deuda_id) if deuda_id else ""),
+                (desc or ""),
+                formato_moneda(float(monto or 0.0))
+            ))
+
+        def _sel_id():
+            it = tree.focus()
+            if not it: return None
+            vals = tree.item(it, "values")
+            if not vals: return None
+            return int(vals[0])
+
+        # --- Edición ---
+        def editar():
+            pid = _sel_id()
+            if not pid:
+                messagebox.showinfo("Editar", "Selecciona un abono en la tabla.", parent=win); return
+            # leer registro actual
+            try:
+                with get_connection() as conn:
+                    cur = conn.cursor()
+                    cur.execute("SELECT id, proveedor_id, deuda_proveedor_id, fecha, descripcion, monto FROM pagos_proveedores WHERE id = ?", (pid,))
+                    row = cur.fetchone()
+                    if not row:
+                        messagebox.showerror("Editar", "No se encontró el abono.", parent=win); return
+                    _id, prov_id, deuda_id, fecha, desc, monto = row
+                    prov_id = int(prov_id) if prov_id is not None else None
+                    deuda_id = int(deuda_id) if deuda_id is not None else None
+                    monto = float(monto or 0.0)
+            except Exception as e:
+                messagebox.showerror("Editar", f"No se pudo leer el abono.\n{e}", parent=win); return
+
+            w = tk.Toplevel(win); w.title(f"Editar abono #{pid}")
+            try: w.configure(bg=PALETTE["bg"])
+            except Exception: pass
+            tk.Label(w, text=f"ID: {pid}", bg=PALETTE["bg"], fg=PALETTE["text"]).grid(row=0, column=0, padx=8, pady=(8,2), sticky="w")
+            tk.Label(w, text=f"Deuda vinculada: {deuda_id if deuda_id else '(ninguna)'}", bg=PALETTE["bg"], fg=PALETTE["text"]).grid(row=1, column=0, padx=8, pady=2, sticky="w")
+
+            tk.Label(w, text="Fecha (YYYY-MM-DD HH:MM:SS):", bg=PALETTE["bg"], fg=PALETTE["text"]).grid(row=2, column=0, padx=8, pady=6, sticky="e")
+            e_fecha = ttk.Entry(w, width=22); e_fecha.grid(row=2, column=1, padx=8, pady=6, sticky="w")
+            e_fecha.insert(0, fecha or datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+
+            tk.Label(w, text="Descripción:", bg=PALETTE["bg"], fg=PALETTE["text"]).grid(row=3, column=0, padx=8, pady=6, sticky="e")
+            e_desc = ttk.Entry(w, width=36); e_desc.grid(row=3, column=1, padx=8, pady=6, sticky="we")
+            e_desc.insert(0, desc or "")
+            w.grid_columnconfigure(1, weight=1)
+
+            tk.Label(w, text="Monto $:", bg=PALETTE["bg"], fg=PALETTE["text"]).grid(row=4, column=0, padx=8, pady=6, sticky="e")
+            e_monto = ttk.Entry(w, width=16); e_monto.grid(row=4, column=1, padx=8, pady=6, sticky="w")
+            adjuntar_validador_2_decimales(e_monto, permitir_vacio=False)
+            e_monto.insert(0, f"{monto:.2f}")
+
+            def guardar():
+                from ui.helpers import to_float, redondear_dos_decimales
+                try:
+                    nuevo_monto = to_float(e_monto.get(), permitir_cero=False)
+                except Exception:
+                    messagebox.showerror("Monto", "Monto inválido.", parent=w); return
+                if nuevo_monto <= 0:
+                    messagebox.showerror("Monto", "Debe ser mayor a 0.", parent=w); return
+                nueva_fecha = (e_fecha.get() or datetime.now().strftime("%Y-%m-%d %H:%M:%S")).strip()
+                nueva_desc  = (e_desc.get() or "").strip()
+
+                try:
+                    with get_connection() as conn:
+                        cur = conn.cursor()
+                        # ajustar saldo si hay deuda vinculada
+                        if deuda_id:
+                            cur.execute("SELECT saldo FROM deudas_proveedores WHERE id = ?", (int(deuda_id),))
+                            r = cur.fetchone()
+                            if r:
+                                saldo = float(r[0] or 0.0)
+                                delta = float(nuevo_monto) - float(monto)
+                                nuevo_saldo = redondear_dos_decimales(max(0.0, saldo - delta))
+                                cur.execute("UPDATE deudas_proveedores SET saldo = ? WHERE id = ?", (float(nuevo_saldo), int(deuda_id)))
+                        # actualizar abono
+                        cur.execute("""
+                            UPDATE pagos_proveedores
+                            SET fecha = ?, descripcion = ?, monto = ?
+                            WHERE id = ?
+                        """, (nueva_fecha, nueva_desc, float(nuevo_monto), int(pid)))
+                    messagebox.showinfo("Éxito", "Abono actualizado.", parent=w)
+                    w.destroy()
+                    self._cargar_cxp_creditos()
+                    self._cargar_pagos_por_deuda()
+                    # refrescar tabla local
+                    for iid in tree.get_children(""):
+                        if int(tree.item(iid, "values")[0]) == pid:
+                            tree.item(iid, values=(
+                                pid,
+                                (nueva_fecha.split(" ")[0] if nueva_fecha else ""),
+                                tree.item(iid, "values")[2],
+                                (deuda_id if deuda_id else ""),
+                                nueva_desc,
+                                formato_moneda(nuevo_monto)
+                            ))
+                            break
+                except Exception as e:
+                    messagebox.showerror("Error", f"No se pudo guardar.\n{e}", parent=w)
+
+            ttk.Button(w, text="Guardar", command=guardar, style="Success.TButton")\
+                .grid(row=5, column=0, columnspan=2, pady=8, padx=8, sticky="ew")
+            w.bind("<Return>", lambda _e: guardar())
+            w.bind("<Escape>", lambda _e: w.destroy())
+            try: w.grab_set()
+            except Exception: pass
+
+        # --- Eliminación ---
+        def eliminar():
+            pid = _sel_id()
+            if not pid:
+                messagebox.showinfo("Eliminar", "Selecciona un abono.", parent=win); return
+            if not messagebox.askyesno("Confirmar", f"¿Eliminar abono #{pid}?", parent=win):
+                return
+            try:
+                with get_connection() as conn:
+                    cur = conn.cursor()
+                    cur.execute("SELECT deuda_proveedor_id, monto FROM pagos_proveedores WHERE id = ?", (int(pid),))
+                    r = cur.fetchone()
+                    deuda_id = int(r[0]) if r and r[0] is not None else None
+                    monto = float(r[1] or 0.0)
+
+                    # reponer saldo si corresponde
+                    if deuda_id:
+                        cur.execute("UPDATE deudas_proveedores SET saldo = saldo + ? WHERE id = ?", (float(monto), int(deuda_id)))
+
+                    # eliminar pago
+                    cur.execute("DELETE FROM pagos_proveedores WHERE id = ?", (int(pid),))
+                messagebox.showinfo("Éxito", "Abono eliminado.", parent=win)
+                # quitar de la tabla
+                it = tree.focus()
+                if it: tree.delete(it)
+                self._cargar_cxp_creditos()
+                self._cargar_pagos_por_deuda()
+            except Exception as e:
+                messagebox.showerror("Error", f"No se pudo eliminar.\n{e}", parent=win)
+
+        # --- Barra inferior ---
+        bar = tk.Frame(win, bg=PALETTE["panel"]); bar.pack(fill="x", padx=8, pady=8)
+        ttk.Button(bar, text="Editar", command=editar).pack(side="left", padx=(0,8))
+        ttk.Button(bar, text="Eliminar", command=eliminar, style="Danger.TButton").pack(side="left")
+        ttk.Button(bar, text="Cerrar", command=win.destroy).pack(side="right")
+        try: win.grab_set()
+        except Exception: pass
+
 
     # ---------------------------
     # Post-construcción

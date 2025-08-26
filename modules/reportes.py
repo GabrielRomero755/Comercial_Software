@@ -171,17 +171,41 @@ class ReportesFrame(tk.Frame):
         except Exception:
             pass
         return cols
+    def _table_exists(self, name: str) -> bool:
+        try:
+            with get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?", (name,))
+                return cur.fetchone() is not None
+        except Exception:
+            return False
+
 
     def _detect_schema_flags(self):
+        """Refresca flags de esquema y detecta tabla de pagos de clientes (singular/plural)."""
+        # Proveedores / productos (existentes)
         self._has_deudas_prov = self._table_exists("deudas_proveedores")
         self._has_pagos_prov  = self._table_exists("pagos_proveedores")
-        self._has_pagos_cli   = self._table_exists("pagos_clientes")
+
+        # Pagos de clientes: acepta plural o singular
+        if self._table_exists("pagos_clientes"):
+            self._pagos_cli_table = "pagos_clientes"
+        elif self._table_exists("pagos_cliente"):
+            self._pagos_cli_table = "pagos_cliente"
+        else:
+            self._pagos_cli_table = None
+        self._has_pagos_cli = self._pagos_cli_table is not None  # flag único para la UI
+
+        # Campos opcionales
         ccols = self._columns_in("clientes")
         self._clientes_has_direccion = ("direccion" in ccols)
         pcols = self._columns_in("productos")
-        self._productos_cost_cols["costo_kg"] = ("costo_kg" in pcols)
-        self._productos_cost_cols["costo"] = ("costo" in pcols)
-        self._productos_cost_cols["costo_unitario"] = ("costo_unitario" in pcols)
+        self._productos_cost_cols = {
+            "costo_kg":       ("costo_kg" in pcols),
+            "costo":          ("costo" in pcols),
+            "costo_unitario": ("costo_unitario" in pcols),
+        }
+
 
     # -------------------- Helpers visuales -------------------
     def _panel(self, parent, **pack):
@@ -546,8 +570,8 @@ class ReportesFrame(tk.Frame):
     @staticmethod
     def _rango_semana_actual():
         h = date.today()
-        inicio = h - timedelta(days=h.weekday())
-        fin = inicio + timedelta(days=6)
+        inicio = h - timedelta(days=6)
+        fin = h
         return str(inicio), str(fin)
 
     @staticmethod
@@ -1389,7 +1413,6 @@ class ReportesFrame(tk.Frame):
 
         cargar_lista()
 
-
     # ========= NUEVA Pestaña: Deudas de Clientes ============
     def init_tab_deudas_clientes(self):
         top = self._panel(self.tab_deudas_cli, pady=10, padx=8, fill="x")
@@ -1476,11 +1499,17 @@ class ReportesFrame(tk.Frame):
         self.cli_fecha_ini.bind("<Return>", lambda e: self.generar_deudas_cliente())
         self.cli_fecha_fin.bind("<Return>", lambda e: self.generar_deudas_cliente())
 
-        # Aviso si no hay pagos_clientes
+        # Aviso si no hay tabla de pagos de clientes (singular o plural)
         if not self._has_pagos_cli:
-            tk.Label(self.tab_deudas_cli,
-                     text="Aviso: No existe la tabla 'pagos_clientes'. Se mostrarán 0 pagos.",
-                     bg=self.palette["bg"], fg=self.palette["warning"]).pack(pady=(0, 8))
+            tk.Label(
+                self.tab_deudas_cli,
+                text="Aviso: No existe la tabla de pagos de clientes ('pagos_clientes' o 'pagos_cliente'). Se mostrarán 0 pagos.",
+                bg=self.palette["bg"],
+                fg=self.palette["warning"]
+            ).pack(pady=(0, 8))
+
+
+
 
     def _cargar_clientes(self):
         try:
@@ -1521,6 +1550,9 @@ class ReportesFrame(tk.Frame):
         self.cliente_credito_rows.clear()
         self.cliente_pagos_rows.clear()
 
+        # Refrescar flags por si cambió el esquema en caliente
+        self._detect_schema_flags()
+
         cli_nom = (self.combo_cli.get() or "").strip()
         if not cli_nom:
             messagebox.showwarning("Cliente", "Selecciona un cliente.")
@@ -1535,40 +1567,63 @@ class ReportesFrame(tk.Frame):
         self._set_info_cliente(cid)
 
         try:
+            # 1) Ventas a crédito en el rango
             with get_connection() as conn:
                 cur = conn.cursor()
-                # Ventas a crédito (detalle por producto)
                 cur.execute("""
                     SELECT v.fecha, p.nombre, COALESCE(v.unidades,0), COALESCE(v.kilos,0),
-                           COALESCE(v.precio,0), COALESCE(v.total, v.kilos * v.precio)
+                        COALESCE(v.precio,0), COALESCE(v.total, v.kilos * v.precio)
                     FROM ventas v
                     JOIN productos p ON p.id = v.producto_id
-                    WHERE v.tipo_venta = 'credito' AND v.cliente_id = ? AND DATE(v.fecha) BETWEEN ? AND ?
+                    WHERE v.tipo_venta = 'credito'
+                    AND v.cliente_id = ?
+                    AND DATE(v.fecha) BETWEEN ? AND ?
                     ORDER BY v.fecha DESC
                 """, (cid, f1, f2))
                 vtas = cur.fetchall()
 
-                pagos = []
-                if self._has_pagos_cli:
-                    cols = self._columns_in("pagos_clientes")
+            # 2) Pagos del cliente (usa tabla singular/plural si existe) + saldo actual
+            pagos = []
+            saldo_actual = 0.0
+            with get_connection() as conn:
+                cur = conn.cursor()
+
+                if self._pagos_cli_table:
+                    cols = self._columns_in(self._pagos_cli_table)
+
                     if "cliente_id" in cols:
-                        cur.execute("""
-                            SELECT fecha, IFNULL(descripcion,''), monto
-                            FROM pagos_clientes
+                        # Detectar columna de descripción (si no existe, usar cadena vacía)
+                        desc_candidates = ["descripcion", "detalle", "concepto", "nota", "observacion", "observaciones"]
+                        monto_candidates = ["monto", "importe", "pago", "cantidad", "valor"]
+
+                        desc_col = next((c for c in desc_candidates if c in cols), None)
+                        monto_col = next((c for c in monto_candidates if c in cols), None)
+
+                        desc_expr = f"IFNULL({desc_col},'')" if desc_col else "''"
+                        monto_expr = monto_col if monto_col else "0"
+
+                        cur.execute(
+                            f"""
+                            SELECT fecha, {desc_expr} AS descripcion, {monto_expr} AS monto
+                            FROM {self._pagos_cli_table}
                             WHERE cliente_id = ? AND DATE(fecha) BETWEEN ? AND ?
                             ORDER BY fecha DESC
-                        """, (cid, f1, f2))
+                            """,
+                            (cid, f1, f2)
+                        )
                         pagos = cur.fetchall()
 
-                # Saldo actual del cliente
+                # Siempre lee el saldo "live" del cliente
                 cur.execute("SELECT COALESCE(deuda_total,0) FROM clientes WHERE id = ?", (cid,))
                 saldo_actual = float((cur.fetchone() or (0.0,))[0])
 
+
+            # 3) Pintar ventas
             total_imp = 0.0
             for fecha, prod, un, kg, precio, total in vtas:
                 un = float(un or 0); kg = float(kg or 0)
                 pr = redondear_dos_decimales(precio or 0)
-                tt = redondear_dos_decimales(total or (kg*pr))
+                tt = redondear_dos_decimales(total or (kg * pr))
                 total_imp += tt
                 self.tree_cli_vtas.insert("", "end", values=(
                     formatear_fecha(fecha), prod, f"{redondear_dos_decimales(un):.2f}",
@@ -1576,6 +1631,7 @@ class ReportesFrame(tk.Frame):
                 ))
                 self.cliente_credito_rows.append((str(fecha), prod, float(un), float(kg), float(pr), float(tt)))
 
+            # 4) Pintar pagos
             total_pagos = 0.0
             for fecha, desc, monto in pagos:
                 mo = redondear_dos_decimales(monto or 0.0)
@@ -1583,23 +1639,28 @@ class ReportesFrame(tk.Frame):
                 self.tree_cli_pagos.insert("", "end", values=(formatear_fecha(fecha), desc, formato_moneda(mo)))
                 self.cliente_pagos_rows.append((str(fecha), desc, float(mo)))
 
+            # 5) Totales
             self.total_importe_cliente = redondear_dos_decimales(total_imp)
             self.total_pagos_cliente = redondear_dos_decimales(total_pagos)
-            # Preferimos el saldo "live" de la tabla clientes (consistente con ventas/pagos del sistema)
             self.saldo_cliente = redondear_dos_decimales(saldo_actual)
 
             if not vtas and not pagos:
                 messagebox.showinfo("Sin datos", "No hay movimientos en el rango seleccionado.")
 
             self.lbl_resumen_cli.config(text=f"Compras: {formato_moneda(self.total_importe_cliente)} | "
-                                             f"Pagos: {formato_moneda(self.total_pagos_cliente)} | "
-                                             f"Saldo: {formato_moneda(self.saldo_cliente)}")
+                                            f"Pagos: {formato_moneda(self.total_pagos_cliente)} | "
+                                            f"Saldo: {formato_moneda(self.saldo_cliente)}")
 
-            set_treeview_stripes(self.tree_cli_vtas, even_bg=self.palette.get("alt_row", "#F2F2F2"), odd_bg=self.palette.get("panel", "#FFFFFF"))
-            set_treeview_stripes(self.tree_cli_pagos, even_bg=self.palette.get("alt_row", "#F2F2F2"), odd_bg=self.palette.get("panel", "#FFFFFF"))
+            set_treeview_stripes(self.tree_cli_vtas,
+                                even_bg=self.palette.get("alt_row", "#F2F2F2"),
+                                odd_bg=self.palette.get("panel", "#FFFFFF"))
+            set_treeview_stripes(self.tree_cli_pagos,
+                                even_bg=self.palette.get("alt_row", "#F2F2F2"),
+                                odd_bg=self.palette.get("panel", "#FFFFFF"))
 
         except Exception as e:
             messagebox.showerror("Error", f"No se pudo generar la vista de deudas del cliente.\n{e}")
+   
 
     def exportar_csv_deudas_cli(self):
         if not (self.cliente_credito_rows or self.cliente_pagos_rows):
@@ -2265,22 +2326,33 @@ class ReportesFrame(tk.Frame):
         except Exception as e:
             messagebox.showerror("Error", f"No se pudo generar la gráfica.\n{e}")
 
-    # ================= Calendario ===================
+    # ================= Calendario (forzar popup) ===================
     def abrir_calendario(self, entry_target: ttk.Entry, fuentes=("all",)):
         """
-        Abre el CalendarioWidget y coloca la fecha seleccionada en entry_target.
-        Mantiene una única ventana de calendario.
+        Abre el CalendarioWidget en una ventana emergente (Toplevel)
+        y coloca la fecha seleccionada en entry_target.
+        Mantiene una única ventana de calendario abierta.
         """
-        # Cerrar si ya existe
+        # Cerrar calendario previo si sigue abierto
         try:
             if self._calendar_win and self._calendar_win.winfo_exists():
-                try:
-                    self._calendar_win.destroy()
-                except Exception:
-                    pass
+                self._calendar_win.destroy()
         except Exception:
             pass
 
+        # Crear popup
+        top = tk.Toplevel(self)
+        top.title("Seleccionar fecha")
+        try:
+            top.configure(bg=self.palette["bg"])
+        except Exception:
+            pass
+        top.transient(self.winfo_toplevel())
+        top.grab_set()
+        top.bind("<Escape>", lambda _: top.destroy())
+        self._calendar_win = top  # mantener referencia
+
+        # Callback de selección (si el widget usa on_select)
         def _on_select(fecha_str: str):
             try:
                 entry_target.delete(0, tk.END)
@@ -2293,22 +2365,27 @@ class ReportesFrame(tk.Frame):
             except Exception:
                 pass
 
-        # Intentar distintas firmas para mayor compatibilidad
+        # Intentar firma (parent, entry_target, fuentes=...)
         try:
-            self._calendar_win = CalendarioWidget(self, on_select=_on_select, fuentes=fuentes)  # type: ignore[call-arg]
-            # Algunos widgets se manejan como Toplevel; aseguramos visible:
+            CalendarioWidget(top, entry_target, fuentes=fuentes)
+            return
+        except TypeError:
+            # Intentar firma (parent, on_select=..., fuentes=...)
             try:
-                self._calendar_win.lift()
+                CalendarioWidget(top, on_select=_on_select, fuentes=fuentes)
+                return
             except Exception:
                 pass
-        except TypeError:
-            try:
-                # Firma alternativa: (master, _on_select)
-                self._calendar_win = CalendarioWidget(self, _on_select)  # type: ignore[call-arg]
-            except Exception:
-                messagebox.showinfo("Calendario", "No se pudo abrir el calendario. Ingresa la fecha como YYYY-MM-DD.")
         except Exception:
-            messagebox.showinfo("Calendario", "No se pudo abrir el calendario. Ingresa la fecha como YYYY-MM-DD.")
+            pass
+
+        # Fallback
+        try:
+            top.destroy()
+        except Exception:
+            pass
+        messagebox.showinfo("Calendario", "No se pudo abrir el calendario. Ingresa la fecha como YYYY-MM-DD.")
+    
 
 # ================= Utilidades: ordenamiento Treeview =================
 

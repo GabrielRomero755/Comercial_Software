@@ -166,7 +166,7 @@ class VentasFrame(tk.Frame):
                                   relief="flat", highlightthickness=1,
                                   highlightbackground=BRAND_PALETTE["border"], highlightcolor=BRAND_PALETTE["accent"],
                                   validate="key", validatecommand=vcmd_decimal)
-        self.ent_kilos.grid(row=0, column=5, padx=4, pady=2, sticky="we")
+        self.ent_kilos.grid(row=0, column=3, padx=4, pady=2, sticky="we")
         self.ent_kilos.bind("<Return>", lambda e: self._do_sale())
         adjuntar_validador_2_decimales(self.ent_kilos, permitir_vacio=True)
 
@@ -178,10 +178,10 @@ class VentasFrame(tk.Frame):
                                   relief="flat", highlightthickness=1,
                                   highlightbackground=BRAND_PALETTE["border"], highlightcolor=BRAND_PALETTE["accent"],
                                   validate="key", validatecommand=vcmd_decimal)
-        self.ent_cajas.grid(row=0, column=7, padx=4, pady=2, sticky="we")
+        self.ent_cajas.grid(row=0, column=5, padx=4, pady=2, sticky="we")
         self.ent_cajas.bind("<Return>", lambda e: self._do_sale())
         adjuntar_validador_2_decimales(self.ent_cajas, permitir_vacio=True)
-        
+
         # Unidades (entero ≥ 1)
         tk.Label(form, text="Unidades:", bg=BRAND_PALETTE["panel"], fg=BRAND_PALETTE["text"])\
             .grid(row=0, column=6, sticky="e", padx=4, pady=2)
@@ -190,8 +190,9 @@ class VentasFrame(tk.Frame):
                                      relief="flat", highlightthickness=1,
                                      highlightbackground=BRAND_PALETTE["border"], highlightcolor=BRAND_PALETTE["accent"],
                                      validate="key", validatecommand=vcmd_entero)
-        self.ent_unidades.grid(row=0, column=3, padx=4, pady=2, sticky="we")
+        self.ent_unidades.grid(row=0, column=7, padx=4, pady=2, sticky="we")
         self.ent_unidades.bind("<Return>", lambda e: self._do_sale())
+
 
         # Modo de precio
         mode_frame = tk.Frame(form, bg=BRAND_PALETTE["panel"])
@@ -561,9 +562,9 @@ class VentasFrame(tk.Frame):
             return
 
         # Modalidad (UNIDADES o KILOS) — CAJAS es solo referencial (para descontar stock de cajas)
-        kilos_txt    = self.ent_kilos.get().strip()
-        cajas_txt    = self.ent_cajas.get().strip()
         unidades_txt = self.ent_unidades.get().strip()
+        cajas_txt    = self.ent_cajas.get().strip()
+        kilos_txt    = self.ent_kilos.get().strip()
 
         # CAJAS: opcional, solo para restar stock de num_cajas (no afecta total)
         try:
@@ -575,8 +576,8 @@ class VentasFrame(tk.Frame):
             return
 
         modalidad = None
-        kilos = 0.0
         unidades = 0
+        kilos = 0.0
 
         if kilos_txt:
             try:
@@ -597,11 +598,10 @@ class VentasFrame(tk.Frame):
                 messagebox.showerror("Error", "Unidades inválidas (entero positivo).")
                 return
             modalidad = "unidades"
-        
         else:
-            # Si solo metieron cajas, NO se permite (total se calcula por kilos o unidades)
             messagebox.showerror("Error", "Ingresa Kilos o Unidades para registrar la venta.\n(Cajas son solo de control de inventario)")
             return
+
 
         # Precio
         try:
@@ -764,20 +764,21 @@ class VentasFrame(tk.Frame):
             messagebox.showerror("Error", "Número de cajas inválido."); return
 
         try:
-            if unidades_txt:
+            if kilos_txt:
+                kilos = to_float(kilos_txt, permitir_cero=False)
+                modalidad = "KILOS"
+            elif unidades_txt:
                 if not self._productos_has_unidades:
                     messagebox.showerror("No disponible", "La BD no soporta venta por unidades.")
                     return
                 unidades = int(unidades_txt)
                 if unidades <= 0: raise ValueError
                 modalidad = "UNIDADES"
-            elif kilos_txt:
-                kilos = to_float(kilos_txt, permitir_cero=False)
-                modalidad = "KILOS"
             else:
-                messagebox.showerror("Error", "Ingresa Unidades o Kilos (las Cajas son opcionales)."); return
+                messagebox.showerror("Error", "Ingresa Kilos o Unidades (las Cajas son opcionales)."); return
         except Exception:
             messagebox.showerror("Error", "Cantidad inválida."); return
+
 
         try:
             precio = to_float(self.ent_precio.get(), permitir_cero=False)
@@ -937,44 +938,52 @@ class VentasFrame(tk.Frame):
             with get_connection() as conn:
                 cur = conn.cursor()
                 extra_estado = ", v.estado" if self._ventas_has_estado else ", 'ACTIVA' AS estado"
+
+                base_select = f"""
+                    SELECT
+                        v.id,
+                        v.fecha{extra_estado},
+                        /* Nombre producto o etiqueta de carrito */
+                        COALESCE(
+                            p.nombre,
+                            'Carrito (' || (SELECT COUNT(*) FROM venta_items vi WHERE vi.venta_id = v.id) || ' items)'
+                        ) AS producto_nombre,
+                        /* Modo: si viene de carrito (producto_id NULL) etiquetar como CARRITO */
+                        CASE
+                            WHEN v.producto_id IS NULL THEN 'CARRITO'
+                            WHEN IFNULL(v.unidades,0) > 0 THEN 'UNIDADES'
+                            WHEN IFNULL(v.kilos,0)    > 0 THEN 'KILOS'
+                            ELSE 'N/A'
+                        END AS modo,
+                        v.unidades, v.kilos, v.num_cajas,
+                        v.precio,
+                        COALESCE(v.total, v.kilos * v.precio) AS total,
+                        v.tipo_venta,
+                        c.nombre
+                    FROM ventas v
+                    LEFT JOIN productos p ON p.id = v.producto_id
+                    LEFT JOIN clientes  c ON c.id = v.cliente_id
+                """
+
                 if filtro:
                     like = f"%{filtro}%"
-                    cur.execute(f"""
-                        SELECT
-                            v.id, v.fecha{extra_estado}, p.nombre,
-                            CASE
-                                WHEN IFNULL(v.unidades,0) > 0 THEN 'UNIDADES'
-                                WHEN IFNULL(v.kilos,0)    > 0 THEN 'KILOS'
-                                WHEN IFNULL(v.kilos,0)    > 0 THEN 'KILOS'
-                                ELSE 'N/A'
-                            END AS modo,
-                            v.unidades, v.kilos, v.num_cajas,
-                            v.precio, COALESCE(v.total, v.kilos * v.precio) AS total,
-                            v.tipo_venta, c.nombre
-                        FROM ventas v
-                         LEFT JOIN productos p ON p.id = v.producto_id
-                        LEFT JOIN clientes c ON c.id = v.cliente_id
-                        WHERE p.nombre LIKE ? OR IFNULL(c.nombre,'') LIKE ? OR IFNULL(v.tipo_venta,'') LIKE ? OR DATE(v.fecha) LIKE ?
+                    cur.execute(
+                        base_select + """
+                        WHERE COALESCE(p.nombre, '') LIKE ?
+                        OR IFNULL(c.nombre,'') LIKE ?
+                        OR IFNULL(v.tipo_venta,'') LIKE ?
+                        OR DATE(v.fecha) LIKE ?
                         ORDER BY v.fecha DESC
-                    """, (like, like, like, like))
+                        """,
+                        (like, like, like, like)
+                    )
                 else:
-                    cur.execute(f"""
-                        SELECT
-                            v.id, v.fecha{extra_estado}, p.nombre,
-                            CASE
-                                WHEN IFNULL(v.unidades,0) > 0 THEN 'UNIDADES'
-                                WHEN IFNULL(v.kilos,0)    > 0 THEN 'KILOS'
-                                WHEN IFNULL(v.kilos,0)    > 0 THEN 'KILOS'
-                                ELSE 'N/A'
-                            END AS modo,
-                            v.unidades, v.kilos, v.num_cajas,
-                            v.precio, COALESCE(v.total, v.kilos * v.precio) AS total,
-                            v.tipo_venta, c.nombre
-                        FROM ventas v
-                        JOIN productos p ON p.id = v.producto_id
-                        LEFT JOIN clientes c ON c.id = v.cliente_id
+                    cur.execute(
+                        base_select + """
                         ORDER BY v.fecha DESC
-                    """)
+                        """
+                    )
+
                 rows = cur.fetchall()
 
             for (vid, fecha, estado, prod, modo, unidades, kilos, num_cajas, precio, total, tipo, cliente) in rows:
@@ -1015,6 +1024,7 @@ class VentasFrame(tk.Frame):
                 }
         except Exception as e:
             messagebox.showerror("Error", f"No se pudieron cargar las ventas.\n{e}")
+
 
     def _log_venta_event(self, cur, venta_id: int, accion: str, detalle_json: str):
         """
@@ -1148,6 +1158,316 @@ class VentasFrame(tk.Frame):
         if self._ventas_has_estado and str(data.get("estado", "")).strip().upper() == "CANCELADA":
             messagebox.showinfo("Modificar", "No se puede modificar una venta cancelada.")
             return
+
+        # Detectar si es venta con carrito (producto_id NULL)
+        try:
+            with get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT producto_id, total, tipo_venta, cliente_id FROM ventas WHERE id = ?", (data["id"],))
+                row = cur.fetchone()
+                if not row:
+                    messagebox.showerror("Error", "Venta no encontrada.")
+                    return
+                v_producto_id, v_total_old, v_tipo_old, v_cliente_id = row
+                es_carrito = v_producto_id is None
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo leer la venta.\n{e}")
+            return
+
+        # --- Rama 1: Venta con carrito (multi-producto) ---
+        if es_carrito and self._has_venta_items:
+            edit = tk.Toplevel(self)
+            edit.title(f"Modificar venta #{data['id']} (carrito)")
+            edit.configure(bg=BRAND_PALETTE["bg"])
+            edit.transient(self.winfo_toplevel())
+            edit.grab_set()
+            edit.bind("<Escape>", lambda e: edit.destroy())
+
+            # Encabezado / tipo de venta
+            tk.Label(edit, text=f"Venta #{data['id']} — {formatear_fecha(data['fecha'])}",
+                    bg=BRAND_PALETTE["bg"], fg=BRAND_PALETTE["text"])\
+                .grid(row=0, column=0, columnspan=3, sticky="w", padx=8, pady=(8,4))
+
+            tipo_var = tk.StringVar(value=(v_tipo_old or "contado"))
+            tk.Label(edit, text="Tipo:", bg=BRAND_PALETTE["bg"], fg=BRAND_PALETTE["text"])\
+                .grid(row=1, column=0, sticky="e", padx=8, pady=(0,8))
+            ttk.Combobox(edit, textvariable=tipo_var, state="readonly", values=["contado", "credito"], width=12)\
+                .grid(row=1, column=1, sticky="w", padx=4, pady=(0,8))
+
+            # Tabla de items
+            cols = ("IDItem", "Producto", "Modo", "Kilos", "Unidades", "Precio", "Importe", "ProductoID")
+            frame_tbl = tk.Frame(edit, bg=BRAND_PALETTE["panel"])
+            frame_tbl.grid(row=2, column=0, columnspan=3, sticky="nsew", padx=8, pady=(0,8))
+
+            tree, sx, sy = self._tree_with_scrolls(frame_tbl, cols)
+            for col, w, anchor in (
+                ("IDItem", 70, "center"),
+                ("Producto", 220, "w"),
+                ("Modo", 90, "center"),
+                ("Kilos", 90, "e"),
+                ("Unidades", 90, "e"),
+                ("Precio", 110, "e"),
+                ("Importe", 120, "e"),
+                ("ProductoID", 0, "center"),
+            ):
+                tree.heading(col, text=col)
+                tree.column(col, width=w, anchor=anchor, stretch=(col in ("Producto",)))
+
+            # Cargar items + snapshot original (para calcular difs)
+            items = []          # lista editable en memoria
+            originales = {}     # id_item -> dict original
+            try:
+                with get_connection() as conn:
+                    cur = conn.cursor()
+                    cur.execute("""
+                        SELECT vi.id, vi.producto_id, p.nombre,
+                            IFNULL(vi.unidades,0) AS unidades,
+                            IFNULL(vi.kilos,0.0)   AS kilos,
+                            IFNULL(vi.num_cajas,0) AS num_cajas,
+                            IFNULL(vi.precio,0.0)  AS precio,
+                            IFNULL(vi.importe,0.0) AS importe
+                        FROM venta_items vi
+                        JOIN productos p ON p.id = vi.producto_id
+                        WHERE vi.venta_id = ?
+                        ORDER BY vi.id ASC
+                    """, (data["id"],))
+                    for (iid_item, pid, nombre, unid, kls, cj, pre, imp) in cur.fetchall():
+                        modo = "UNIDADES" if (unid or 0) > 0 else "KILOS"
+                        d = {
+                            "id_item": int(iid_item),
+                            "producto_id": int(pid),
+                            "producto": nombre or "",
+                            "modo": modo,
+                            "kilos": float(kls or 0.0),
+                            "unidades": int(unid or 0),
+                            "num_cajas": float(cj or 0.0),
+                            "precio": float(pre or 0.0),
+                            "importe": float(imp or 0.0),
+                        }
+                        items.append(d)
+                        originales[d["id_item"]] = d.copy()
+            except Exception as e:
+                messagebox.showerror("Error", f"No se pudieron cargar los ítems.\n{e}", parent=edit)
+                edit.destroy(); return
+
+            def pintar():
+                tree.delete(*tree.get_children())
+                for it in items:
+                    tree.insert("", "end", values=(
+                        it["id_item"], it["producto"], it["modo"],
+                        f"{redondear_dos_decimales(it['kilos']):.2f}",
+                        str(int(it["unidades"] or 0)),
+                        formato_moneda(redondear_dos_decimales(it["precio"])),
+                        formato_moneda(redondear_dos_decimales(it["importe"])),
+                        it["producto_id"],
+                    ))
+                total = sum(float(it["importe"] or 0.0) for it in items)
+                lbl_total.config(text=f"Total: {formato_moneda(redondear_dos_decimales(total))}")
+
+            # Botonera
+            bar = tk.Frame(edit, bg=BRAND_PALETTE["bg"])
+            bar.grid(row=3, column=0, columnspan=3, sticky="we", padx=8, pady=(0,8))
+
+            def editar_item():
+                sel = tree.selection()
+                if not sel:
+                    messagebox.showinfo("Editar", "Selecciona un ítem.")
+                    return
+                vals = tree.item(sel[0], "values")
+                id_item = int(vals[0])
+                it = next((x for x in items if x["id_item"] == id_item), None)
+                if not it:
+                    return
+
+                dlg = tk.Toplevel(edit)
+                dlg.title(f"Editar ítem #{id_item} — {it['producto']}")
+                dlg.configure(bg=BRAND_PALETTE["bg"])
+                dlg.transient(edit); dlg.grab_set()
+                dlg.bind("<Escape>", lambda e: dlg.destroy())
+
+                tk.Label(dlg, text=f"Producto: {it['producto']}", bg=BRAND_PALETTE["bg"], fg=BRAND_PALETTE["text"])\
+                    .grid(row=0, column=0, columnspan=2, sticky="w", padx=8, pady=(8,4))
+                tk.Label(dlg, text=f"Modo: {it['modo']}", bg=BRAND_PALETTE["bg"], fg=BRAND_PALETTE["text"])\
+                    .grid(row=1, column=0, columnspan=2, sticky="w", padx=8, pady=(0,8))
+
+                tk.Label(dlg, text="Kilos:", bg=BRAND_PALETTE["bg"], fg=BRAND_PALETTE["text"])\
+                    .grid(row=2, column=0, sticky="e", padx=8, pady=4)
+                ent_k = tk.Entry(dlg, width=12, bg=BRAND_PALETTE["entry_bg"], fg=BRAND_PALETTE["entry_fg"],
+                                relief="flat", highlightthickness=1,
+                                highlightbackground=BRAND_PALETTE["border"], highlightcolor=BRAND_PALETTE["accent"])
+                ent_k.grid(row=2, column=1, sticky="w", padx=8, pady=4)
+                adjuntar_validador_2_decimales(ent_k, permitir_vacio=True)
+                ent_k.insert(0, f"{it['kilos']:.2f}" if it["modo"]=="KILOS" else "")
+
+                tk.Label(dlg, text="Unidades:", bg=BRAND_PALETTE["bg"], fg=BRAND_PALETTE["text"])\
+                    .grid(row=3, column=0, sticky="e", padx=8, pady=4)
+                ent_u = tk.Entry(dlg, width=12, bg=BRAND_PALETTE["entry_bg"], fg=BRAND_PALETTE["entry_fg"],
+                                relief="flat", highlightthickness=1,
+                                highlightbackground=BRAND_PALETTE["border"], highlightcolor=BRAND_PALETTE["accent"])
+                ent_u.grid(row=3, column=1, sticky="w", padx=8, pady=4)
+                adjuntar_validador_2_decimales(ent_u, permitir_vacio=True)
+                ent_u.insert(0, str(it["unidades"]) if it["modo"]=="UNIDADES" else "")
+
+                tk.Label(dlg, text="Precio:", bg=BRAND_PALETTE["bg"], fg=BRAND_PALETTE["text"])\
+                    .grid(row=4, column=0, sticky="e", padx=8, pady=4)
+                ent_p = tk.Entry(dlg, width=12, bg=BRAND_PALETTE["entry_bg"], fg=BRAND_PALETTE["entry_fg"],
+                                relief="flat", highlightthickness=1,
+                                highlightbackground=BRAND_PALETTE["border"], highlightcolor=BRAND_PALETTE["accent"])
+                ent_p.grid(row=4, column=1, sticky="w", padx=8, pady=4)
+                adjuntar_validador_2_decimales(ent_p, permitir_vacio=False)
+                ent_p.insert(0, f"{it['precio']:.2f}")
+
+                def guardar_item():
+                    try:
+                        nuevo_precio = to_float(ent_p.get(), permitir_cero=False)
+                    except Exception:
+                        messagebox.showerror("Error", "Precio inválido.", parent=dlg); return
+
+                    # Mantener modo del ítem: si es KILOS, edita kilos; si UNIDADES, edita unidades
+                    nuevo_k = it["kilos"]
+                    nuevo_u = it["unidades"]
+                    try:
+                        if it["modo"] == "KILOS":
+                            val = ent_k.get().strip()
+                            nuevo_k = to_float(val, permitir_cero=False)
+                            if nuevo_k <= 0:
+                                raise ValueError
+                        else:
+                            val = ent_u.get().strip()
+                            nuevo_u = int(round(to_float(val, permitir_cero=False)))
+                            if nuevo_u <= 0:
+                                raise ValueError
+                    except Exception:
+                        messagebox.showerror("Error", "Cantidad inválida.", parent=dlg); return
+
+                    # Validar stock por diferencia
+                    try:
+                        with get_connection() as conn:
+                            cur = conn.cursor()
+                            if self._productos_has_unidades:
+                                cur.execute("SELECT kilos, unidades FROM productos WHERE id=?", (it["producto_id"],))
+                                sk = cur.fetchone()
+                                stock_k, stock_u = float(sk[0] or 0.0), int(sk[1] or 0)
+                            else:
+                                cur.execute("SELECT kilos FROM productos WHERE id=?", (it["producto_id"],))
+                                sk = cur.fetchone()
+                                stock_k, stock_u = float(sk[0] or 0.0), None
+
+                        orig = originales[it["id_item"]]
+                        if it["modo"] == "KILOS":
+                            diff_k = float(nuevo_k) - float(orig["kilos"])
+                            if diff_k > 0 and diff_k > stock_k:
+                                messagebox.showerror("Stock", f"Kilos disponibles: {redondear_dos_decimales(stock_k)}", parent=dlg); return
+                        else:
+                            diff_u = int(nuevo_u) - int(orig["unidades"])
+                            if diff_u > 0 and (stock_u is None or diff_u > stock_u):
+                                messagebox.showerror("Stock", f"Unidades disponibles: {stock_u}", parent=dlg); return
+                    except Exception as e:
+                        messagebox.showerror("Error", f"No se pudo validar stock.\n{e}", parent=dlg); return
+
+                    # Aplicar cambios en memoria
+                    it["kilos"] = float(nuevo_k if it["modo"]=="KILOS" else 0.0)
+                    it["unidades"] = int(nuevo_u if it["modo"]=="UNIDADES" else 0)
+                    it["precio"] = float(nuevo_precio)
+                    it["importe"] = redondear_dos_decimales(
+                        (it["kilos"] * it["precio"]) if it["modo"]=="KILOS" else (it["unidades"] * it["precio"])
+                    )
+                    dlg.destroy()
+                    pintar()
+
+                tk.Button(dlg, text="Guardar ítem", command=guardar_item,
+                        bg=BRAND_PALETTE["success"], fg=BRAND_PALETTE["text"], relief="flat", padx=10, pady=6)\
+                    .grid(row=5, column=0, columnspan=2, pady=10)
+                dlg.grid_columnconfigure(1, weight=1)
+                dlg.bind("<Return>", lambda e: guardar_item())
+
+            tk.Button(bar, text="Editar ítem", command=editar_item,
+                    bg=BRAND_PALETTE["primary"], fg=BRAND_PALETTE["text"], relief="flat", padx=10, pady=6)\
+                .pack(side="left", padx=(0,6))
+
+            lbl_total = tk.Label(bar, text=f"Total: {formato_moneda(redondear_dos_decimales(v_total_old or 0.0))}",
+                                bg=BRAND_PALETTE["bg"], fg=BRAND_PALETTE["text"])
+            lbl_total.pack(side="right")
+
+            # Guardar cambios (persistir en BD con ajustes de stock y deuda)
+            def guardar_todo():
+                try:
+                    total_nuevo = sum(float(it["importe"] or 0.0) for it in items)
+                    with get_connection() as conn:
+                        cur = conn.cursor()
+                        # Actualizar cada item y stock por DIFERENCIA vs original
+                        for it in items:
+                            orig = originales[it["id_item"]]
+                            # actualizar item
+                            cur.execute("""
+                                UPDATE venta_items
+                                SET kilos=?, unidades=?, num_cajas=?, precio=?, importe=?
+                                WHERE id=?
+                            """, (float(it["kilos"]), int(it["unidades"]), float(it["num_cajas"]),
+                                float(it["precio"]), float(it["importe"]), int(it["id_item"])))
+                            # stock diferencia
+                            if self._productos_has_unidades:
+                                if it["unidades"] != orig["unidades"]:
+                                    diff_u = int(it["unidades"]) - int(orig["unidades"])
+                                    cur.execute("UPDATE productos SET unidades = unidades - ? WHERE id = ?", (int(diff_u), int(it["producto_id"])))
+                            if it["kilos"] != orig["kilos"]:
+                                diff_k = float(it["kilos"]) - float(orig["kilos"])
+                                cur.execute("UPDATE productos SET kilos = kilos - ? WHERE id = ?", (float(diff_k), int(it["producto_id"])))
+
+                        # actualizar encabezado (total y tipo_venta)
+                        cur.execute("UPDATE ventas SET total=?, tipo_venta=? WHERE id=?",
+                                    (float(total_nuevo), str(tipo_var.get()), int(data["id"])))
+
+                        # ajuste de deuda si corresponde
+                        if self._clientes_has_deuda and v_cliente_id and (v_tipo_old == "credito" or tipo_var.get() == "credito"):
+                            ajuste = float(total_nuevo) - float(v_total_old or 0.0)
+                            cur.execute("UPDATE clientes SET deuda_total = deuda_total + ? WHERE id = ?",
+                                        (float(ajuste), int(v_cliente_id)))
+
+                        # auditoría
+                        if self._ventas_has_eventos:
+                            import json
+                            self._log_venta_event(
+                                cur,
+                                venta_id=int(data["id"]),
+                                accion="modificar",
+                                detalle_json=json.dumps({
+                                    "tipo_venta_de": v_tipo_old,
+                                    "tipo_venta_a": tipo_var.get(),
+                                    "total_de": float(v_total_old or 0.0),
+                                    "total_a": float(total_nuevo),
+                                    "items": [
+                                        {"id_item": it["id_item"],
+                                        "de": {"kilos": originales[it["id_item"]]["kilos"],
+                                                "unidades": originales[it["id_item"]]["unidades"],
+                                                "precio": originales[it["id_item"]]["precio"],
+                                                "importe": originales[it["id_item"]]["importe"]},
+                                        "a":  {"kilos": it["kilos"],
+                                                "unidades": it["unidades"],
+                                                "precio": it["precio"],
+                                                "importe": it["importe"]}}
+                                        for it in items
+                                    ]
+                                }, ensure_ascii=False)
+                            )
+
+                    messagebox.showinfo("Modificar", "Venta actualizada.")
+                    edit.destroy()
+                    self._load_sales(self.ent_buscar.get().strip())
+                    self._refresh_producto_info()
+                except Exception as e:
+                    messagebox.showerror("Error", f"No se pudo guardar la venta.\n{e}", parent=edit)
+
+            tk.Button(edit, text="Guardar cambios", command=guardar_todo,
+                    bg=BRAND_PALETTE["success"], fg=BRAND_PALETTE["text"], relief="flat", padx=10, pady=6)\
+                .grid(row=4, column=0, columnspan=3, pady=(0,10))
+            edit.grid_rowconfigure(2, weight=1)
+            edit.grid_columnconfigure(2, weight=1)
+
+            pintar()
+            return
+
+        # --- Rama 2: Venta simple (compatibilidad con lo anterior) ---
         # Editor simple (cantidad, precio, tipo contado/credito)
         edit = tk.Toplevel(self)
         edit.title(f"Modificar venta #{data['id']}")
@@ -1185,7 +1505,7 @@ class VentasFrame(tk.Frame):
         ttk.Combobox(edit, textvariable=tipo_var, state="readonly", values=["contado", "credito"], width=12)\
             .grid(row=4, column=1, padx=8, pady=4, sticky="w")
 
-        def guardar():
+        def guardar_simple():
             try:
                 cant = to_float(ent_cantidad.get(), permitir_cero=False)
                 pre  = to_float(ent_precio.get(), permitir_cero=False)
@@ -1232,7 +1552,7 @@ class VentasFrame(tk.Frame):
                         )
                         cur.execute("UPDATE productos SET unidades = unidades - ? WHERE id = ?", (diff_u, producto_id))
                         total_nuevo = int(round(cant)) * pre
-                    else:  # KILOS o CAJAS→KILOS
+                    else:  # KILOS
                         diff_k = float(cant) - ok_kilos
                         if diff_k > 0 and diff_k > stock_k:
                             messagebox.showerror("Stock", f"Kilos disponibles: {redondear_dos_decimales(stock_k)}", parent=edit)
@@ -1270,11 +1590,11 @@ class VentasFrame(tk.Frame):
             except Exception as e:
                 messagebox.showerror("Error", f"No se pudo modificar la venta.\n{e}", parent=edit)
 
-        tk.Button(edit, text="Guardar cambios", command=guardar,
+        tk.Button(edit, text="Guardar cambios", command=guardar_simple,
                 bg=BRAND_PALETTE["success"], fg=BRAND_PALETTE["text"], relief="flat", padx=10, pady=6)\
             .grid(row=5, column=0, columnspan=2, pady=10)
         edit.grid_columnconfigure(1, weight=1)
-        edit.bind("<Return>", lambda e: guardar())
+        edit.bind("<Return>", lambda e: guardar_simple())
   
     def _setup_sorting(self, tree: ttk.Treeview, columnas, tipos):
         tree._sort_state = {}

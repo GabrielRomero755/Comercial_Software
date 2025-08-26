@@ -50,7 +50,11 @@ PALETTE = BRAND_PALETTE
 
 class GastosFrame(tk.Frame):
     # Flags de esquema (dinámicos)
+    _has_proveedores: bool = False
+    _has_compras: bool = False
     _has_empleados: bool = False
+    _gastos_has_proveedor_fk: bool = False
+    _gastos_has_compra_fk: bool = False
     _gastos_has_empleado_fk: bool = False
     _gastos_has_cliente_fk: bool = False
 
@@ -104,14 +108,33 @@ class GastosFrame(tk.Frame):
                 ).fetchone()
                 self._has_empleados = bool(r)
 
+                # ---- NUEVO: proveedores/compras ----
+                r = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='proveedores' LIMIT 1"
+                ).fetchone()
+                self._has_proveedores = bool(r)
+
+                r = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='compras' LIMIT 1"
+                ).fetchone()
+                self._has_compras = bool(r)
+
                 # Columnas opcionales en gastos
                 cols = {row[1] for row in conn.execute("PRAGMA table_info(gastos)").fetchall()}
                 self._gastos_has_empleado_fk = "empleado_id" in cols
                 self._gastos_has_cliente_fk = "cliente_id" in cols
+                # ---- NUEVO: FKs opcionales en gastos ----
+                self._gastos_has_proveedor_fk = "proveedor_id" in cols
+                self._gastos_has_compra_fk = "compra_id" in cols
+
         except Exception:
-            self._has_empleados = False
-            self._gastos_has_empleado_fk = False
-            self._gastos_has_cliente_fk = False
+                self._has_empleados = False
+                self._has_proveedores = False
+                self._has_compras = False
+                self._gastos_has_empleado_fk = False
+                self._gastos_has_cliente_fk = False
+                self._gastos_has_proveedor_fk = False
+                self._gastos_has_compra_fk = False
 
     # -------------------------------------------------------
     # UI helpers (¡sin pack implícito!)
@@ -193,8 +216,17 @@ class GastosFrame(tk.Frame):
 
         # Fecha
         self._lbl(form, "Fecha (YYYY-MM-DD):", row=0, column=3, sticky="e", padx=8, pady=6)
-        self.fecha_entry = self._entry(form, width=14, row=0, column=4, padx=4, pady=6, sticky="w")
-        self._btn(form, "📅", "TButton", lambda: self._abrir_calendario(self.fecha_entry), row=0, column=5, padx=4, pady=6, sticky="w")
+
+        # Contenedor para entrada + botón calendario
+        fecha_frame = tk.Frame(form, bg=PALETTE["panel"])
+        fecha_frame.grid(row=0, column=4, padx=4, pady=6, sticky="w")
+
+        self.fecha_entry = ttk.Entry(fecha_frame, width=14, style="TEntry")
+        self.fecha_entry.pack(side="left", fill="x")
+
+        btn_cal = ttk.Button(fecha_frame, text="📅", style="TButton", command=lambda: self._abrir_calendario(self.fecha_entry))
+        btn_cal.pack(side="left", padx=(2, 0))  # separadito con 2px
+
 
         # Empleado (opcional / requerido si tipo == Salarios)
         self._empleado_combo: Optional[ttk.Combobox] = None
@@ -213,7 +245,18 @@ class GastosFrame(tk.Frame):
             self._cliente_combo = self._combobox(form, width=28, row=2, column=col_base + 1, sticky="we", padx=4, pady=6)
             self._btn(form, "Gestionar Clientes", "TButton", self._abrir_crud_clientes, row=2, column=col_base + 2, padx=8, pady=6, sticky="w")
 
+
         self._btn(form, "Registrar Gasto", "Success.TButton", self.registrar_gasto, row=3, column=0, columnspan=8, pady=10)
+
+        # ---- Abono a compra (proveedor) ----
+        if self._has_proveedores and self._has_compras:
+            self._btn(
+                form,
+                "Abonar compra (proveedor)",
+                "TButton",
+                self._abrir_modal_abono_compra,
+                row=4, column=0, columnspan=8, pady=(0, 12)
+            )
 
         # ---------- Búsqueda ----------
         search = self._panel(self)
@@ -226,34 +269,51 @@ class GastosFrame(tk.Frame):
         # ---------- Tabla ----------
         tabla = self._panel(self)
         tabla.grid(row=2, column=0, sticky="nsew", padx=8, pady=8)
+
+        # 1) Definir las columnas base y condicionales
         columnas = ["ID", "Tipo", "Monto", "Descripción", "Fecha"]
         if self._gastos_has_empleado_fk:
             columnas.append("Empleado")
         if self._gastos_has_cliente_fk:
             columnas.append("Cliente")
+        if self._gastos_has_proveedor_fk:
+            columnas.append("Proveedor")
         columnas = tuple(columnas)
 
+        # 2) Crear el Treeview
         self.tree = self._tree_with_scrolls(tabla, columnas, height=12)
+
+        # 3) Anchos / Alineaciones (agrega ‘Proveedor’)
         widths = {
             "ID": 70, "Tipo": 170, "Monto": 110, "Descripción": 360, "Fecha": 150,
-            "Empleado": 200, "Cliente": 220
+            "Empleado": 200, "Cliente": 220, "Proveedor": 220
         }
         anchors = {
             "ID": "center", "Tipo": "w", "Monto": "e", "Descripción": "w", "Fecha": "center",
-            "Empleado": "w", "Cliente": "w"
+            "Empleado": "w", "Cliente": "w", "Proveedor": "w"
         }
+
         for col in columnas:
             self.tree.heading(col, text=col)
-            self.tree.column(col, width=widths.get(col, 120), anchor=anchors.get(col, "w"),
-                             stretch=(col in ("Tipo", "Descripción", "Empleado", "Cliente")))
+            self.tree.column(
+                col,
+                width=widths.get(col, 120),
+                anchor=anchors.get(col, "w"),
+                # que sea “stretch” si es de texto largo
+                stretch=(col in ("Tipo", "Descripción", "Empleado", "Cliente", "Proveedor"))
+            )
 
-        # Ordenamiento por encabezados
+        # 4) Tipos para ordenamiento (agrega ‘Proveedor’)
         tipos_sort = {"ID": "int", "Tipo": "str", "Monto": "money", "Descripción": "str", "Fecha": "date"}
         if self._gastos_has_empleado_fk:
             tipos_sort["Empleado"] = "str"
         if self._gastos_has_cliente_fk:
             tipos_sort["Cliente"] = "str"
+        if self._gastos_has_proveedor_fk:
+            tipos_sort["Proveedor"] = "str"
+
         self._setup_sorting(self.tree, columnas, tipos_sort)
+
 
         # ---------- Acciones ----------
         acciones = self._panel(self)
@@ -312,12 +372,15 @@ class GastosFrame(tk.Frame):
         try:
             with get_connection() as conn:
                 rows = conn.execute("SELECT id, nombre FROM clientes ORDER BY nombre COLLATE NOCASE").fetchall()
-            self._clientes_map = { (r[1] if isinstance(r, tuple) else r["nombre"]) : (r[0] if isinstance(r, tuple) else r["id"]) for r in rows }
+            self._clientes_map = {
+                (r[1] if isinstance(r, tuple) else r["nombre"]): (r[0] if isinstance(r, tuple) else r["id"])
+                for r in rows
+            }
             self._cliente_combo["values"] = list(self._clientes_map.keys())
-            if self._clientes_map and not self._cliente_combo.get():
-                self._cliente_combo.current(0)
+            self._cliente_combo.set("")
         except Exception as e:
             messagebox.showerror("Error", f"No se pudieron cargar los clientes.\n{e}")
+
 
     def _abrir_modal_nuevo_tipo(self):
         """Modal para agregar un nuevo tipo al catálogo."""
@@ -352,6 +415,250 @@ class GastosFrame(tk.Frame):
 
         ttk.Button(win, text="Guardar", command=guardar, style="Success.TButton").grid(row=1, column=0, columnspan=2, pady=10)
         win.bind("<Return>", guardar)
+
+    def _abrir_modal_abono_compra(self):
+        """Modal para registrar un abono a una compra a crédito (proveedor)."""
+        if not (self._has_proveedores and self._has_compras):
+            messagebox.showwarning("No disponible", "No existen tablas 'proveedores' y/o 'compras' en la base de datos.")
+            return
+
+        win = tk.Toplevel(self)
+        win.title("Abonar compra (proveedor)")
+        try:
+            win.configure(bg=PALETTE["bg"])
+        except Exception:
+            pass
+        win.transient(self.winfo_toplevel())
+        win.grab_set()
+        win.bind("<Escape>", lambda _: win.destroy())
+
+        # ---- Proveedor ----
+        tk.Label(win, text="Proveedor:", bg=PALETTE["bg"], fg=PALETTE["text"]).grid(row=0, column=0, padx=10, pady=8, sticky="e")
+        cb_prov = self._combobox(win, width=36, row=0, column=1, padx=10, pady=8, sticky="we")
+
+        # ---- Compra ----
+        tk.Label(win, text="Compra:", bg=PALETTE["bg"], fg=PALETTE["text"]).grid(row=1, column=0, padx=10, pady=8, sticky="e")
+        cb_compra = self._combobox(win, width=36, row=1, column=1, padx=10, pady=8, sticky="we")
+
+        # ---- Info saldo ----
+        lbl_saldo = tk.Label(win, text="Saldo: $0.00", bg=PALETTE["bg"], fg=PALETTE["text"])
+        lbl_saldo.grid(row=1, column=2, padx=8, pady=8, sticky="w")
+
+        # ---- Monto / Fecha / Desc ----
+        tk.Label(win, text="Monto abono:", bg=PALETTE["bg"], fg=PALETTE["text"]).grid(row=2, column=0, padx=10, pady=8, sticky="e")
+        ent_monto = ttk.Entry(win, width=16, style="TEntry"); ent_monto.grid(row=2, column=1, padx=10, pady=8, sticky="w")
+        adjuntar_validador_2_decimales(ent_monto, permitir_vacio=False)
+
+        tk.Label(win, text="Fecha (YYYY-MM-DD):", bg=PALETTE["bg"], fg=PALETTE["text"]).grid(row=3, column=0, padx=10, pady=8, sticky="e")
+        ent_fecha = ttk.Entry(win, width=16, style="TEntry"); ent_fecha.grid(row=3, column=1, padx=(10,0), pady=8, sticky="w")
+        ttk.Button(win, text="📅", command=lambda: self._abrir_calendario(ent_fecha), style="TButton").grid(row=3, column=1, padx=(180,0), pady=8, sticky="w")
+
+        tk.Label(win, text="Descripción (opcional):", bg=PALETTE["bg"], fg=PALETTE["text"]).grid(row=4, column=0, padx=10, pady=8, sticky="e")
+        ent_desc = ttk.Entry(win, width=40, style="TEntry"); ent_desc.grid(row=4, column=1, padx=10, pady=8, sticky="we")
+
+        win.grid_columnconfigure(1, weight=1)
+
+        # ---- Cargar proveedores ----
+        proveedores_map = {}
+        compras_map = {}      # texto -> (compra_id, saldo, total, fecha)
+
+        try:
+            with get_connection() as conn:
+                rows = conn.execute("SELECT id, nombre FROM proveedores ORDER BY nombre COLLATE NOCASE").fetchall()
+            proveedores_map = { (r[1] if isinstance(r, tuple) else r["nombre"]) : (r[0] if isinstance(r, tuple) else r["id"]) for r in rows }
+            cb_prov["values"] = list(proveedores_map.keys())
+            if cb_prov["values"]:
+                cb_prov.current(0)
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudieron cargar proveedores.\n{e}", parent=win)
+            win.destroy()
+            return
+
+        def cargar_compras_del_proveedor(_=None):
+            cb_compra.set("")
+            cb_compra["values"] = ()
+            lbl_saldo.config(text="Saldo: $0.00")
+            compras_map.clear()
+            prov_name = (cb_prov.get() or "").strip()
+            if not prov_name or prov_name not in proveedores_map:
+                return
+            prov_id = proveedores_map[prov_name]
+
+            try:
+                with get_connection() as conn:
+                    cur = conn.cursor()
+
+                    # ¿Existe deudas_proveedores? -> usarla como fuente principal
+                    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='deudas_proveedores'")
+                    has_deudas = (cur.fetchone() is not None)
+
+                    if has_deudas:
+                        # Traer SOLO deudas con saldo > 0 del proveedor
+                        cur.execute("""
+                            SELECT d.id, d.fecha, d.monto, d.saldo, IFNULL(p.nombre,'(s/n)') AS producto
+                            FROM deudas_proveedores d
+                            LEFT JOIN productos p ON p.id = d.producto_id
+                            WHERE d.proveedor_id = ? AND d.saldo > 0
+                            ORDER BY d.fecha DESC, d.id DESC
+                        """, (int(prov_id),))
+                        rows = cur.fetchall()
+                        for did, fecha, total, saldo, prod in rows:
+                            texto = f"#D{did} — {fecha.split(' ')[0] if fecha else 's/f'} — {prod or ''} — Total {formato_moneda(total or 0)} — Saldo {formato_moneda(saldo or 0)}"
+                            compras_map[texto] = (int(did), float(saldo or 0.0), float(total or 0.0), fecha or "", "DEUDA")
+                    else:
+                        # Fallback: esquema anterior basado en 'compras'
+                        cols = {r[1]: r[2] for r in conn.execute("PRAGMA table_info(compras)").fetchall()}
+                        has_prov_fk = "proveedor_id" in cols
+                        total_col = "total" if "total" in cols else ("monto_total" if "monto_total" in cols else None)
+                        saldo_col = "saldo_pendiente" if "saldo_pendiente" in cols else ("deuda_restante" if "deuda_restante" in cols else None)
+                        fecha_col = "fecha" if "fecha" in cols else None
+
+                        where = "WHERE proveedor_id = ?" if has_prov_fk else ""
+                        params = [prov_id] if has_prov_fk else []
+
+                        credito_filter = ""
+                        if saldo_col:
+                            credito_filter = f"{' AND' if where else 'WHERE'} {saldo_col} > 0"
+
+                        select_cols = ["id"]
+                        if total_col: select_cols.append(total_col)
+                        if saldo_col: select_cols.append(saldo_col)
+                        if fecha_col: select_cols.append(fecha_col)
+
+                        sql = f"SELECT {', '.join(select_cols)} FROM compras {where} {credito_filter} ORDER BY id DESC"
+                        rows = conn.execute(sql, tuple(params)).fetchall()
+
+                        for r in rows:
+                            rid = r[0]
+                            idx = 1
+                            total = r[idx] if total_col else 0.0; idx += (1 if total_col else 0)
+                            saldo = r[idx] if saldo_col else 0.0;  idx += (1 if saldo_col else 0)
+                            fecha = r[idx] if fecha_col else ""
+                            texto = f"#{rid} — { (fecha or 's/f') } — Total {formato_moneda(total or 0)} — Saldo {formato_moneda(saldo or 0)}"
+                            compras_map[texto] = (int(rid), float(saldo or 0.0), float(total or 0.0), fecha or "", "COMPRA")
+
+                cb_compra["values"] = list(compras_map.keys())
+                if cb_compra["values"]:
+                    cb_compra.current(0)
+                    on_compra_sel()
+                else:
+                    cb_compra["values"] = ("(Sin deudas/compras pendientes para este proveedor)",)
+                    cb_compra.current(0)
+                    lbl_saldo.config(text="Saldo: $0.00")
+
+            except Exception as e:
+                messagebox.showerror("Error", f"No se pudieron cargar deudas/compras del proveedor.\n{e}", parent=win)
+
+
+        def on_compra_sel(_=None):
+            txt = (cb_compra.get() or "").strip()
+            if txt and txt in compras_map:
+                _, saldo, *_ = compras_map[txt]
+                lbl_saldo.config(text=f"Saldo: {formato_moneda(saldo)}")
+            else:
+                lbl_saldo.config(text="Saldo: $0.00")
+
+        cb_prov.bind("<<ComboboxSelected>>", cargar_compras_del_proveedor)
+        cb_compra.bind("<<ComboboxSelected>>", on_compra_sel)
+        cargar_compras_del_proveedor()
+
+        def guardar(_=None):
+            prov_name = (cb_prov.get() or "").strip()
+            comp_txt  = (cb_compra.get() or "").strip()
+            monto_txt = (ent_monto.get() or "").strip()
+            fecha_txt = (ent_fecha.get() or "").strip()
+            desc_txt  = (ent_desc.get() or "").strip()
+
+            if not prov_name or prov_name not in proveedores_map:
+                messagebox.showerror("Error", "Selecciona un proveedor.", parent=win); return
+            if not comp_txt or comp_txt not in compras_map:
+                messagebox.showerror("Error", "Selecciona una deuda/compra.", parent=win); return
+
+            try:
+                monto = to_float(monto_txt, permitir_cero=False)
+                if monto <= 0: raise ValueError
+            except Exception:
+                messagebox.showerror("Error", "Monto de abono inválido.", parent=win); return
+
+            # Fecha
+            fecha_val = None
+            if fecha_txt:
+                f = normalizar_fecha(fecha_txt)
+                if not es_fecha_ok(f):
+                    messagebox.showerror("Error", "Fecha inválida. Usa YYYY-MM-DD.", parent=win); return
+                fecha_val = f + " 00:00:00"
+            else:
+                fecha_val = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            compra_id, saldo_actual, total_compra, _fecha, fuente = compras_map[comp_txt]
+            if saldo_actual > 0 and monto > saldo_actual:
+                if not messagebox.askyesno("Confirmar", f"El monto ({formato_moneda(monto)}) excede el saldo ({formato_moneda(saldo_actual)}). ¿Continuar?", parent=win):
+                    return
+
+            try:
+                with get_connection() as conn:
+                    cur = conn.cursor()
+
+                    # ¿Tenemos deudas_proveedores (nuevo flujo)?
+                    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='deudas_proveedores'")
+                    has_deudas = (cur.fetchone() is not None)
+
+                    # 1) Insertar GASTO (si tenemos proveedor_id en gastos, lo enlazamos)
+                    cols_g = ["tipo", "monto", "descripcion", "fecha"]
+                    vals_g = ["Abono compra", float(monto), (desc_txt or f"Abono a {'deuda' if has_deudas else 'compra'} #{compra_id} — Proveedor {prov_name}"), fecha_val]
+                    # enlazar proveedor si existe la columna
+                    g_cols = {r[1] for r in conn.execute("PRAGMA table_info(gastos)").fetchall()}
+                    if "proveedor_id" in g_cols:
+                        cols_g.append("proveedor_id"); vals_g.append(int(proveedores_map[prov_name]))
+                    # si quisieras enlazar compra_id cuando fuente = 'COMPRA' y existe la columna:
+                    if (fuente == "COMPRA") and ("compra_id" in g_cols):
+                        cols_g.append("compra_id"); vals_g.append(int(compra_id))
+
+                    cur.execute(f"INSERT INTO gastos ({', '.join(cols_g)}) VALUES ({', '.join('?' for _ in cols_g)})", tuple(vals_g))
+
+                    if has_deudas:
+                        # 2) Registrar el PAGO y actualizar saldo de la deuda
+                        aplica = min(float(monto), float(saldo_actual))
+                        # asegurar pagos_proveedores
+                        conn.execute("""
+                            CREATE TABLE IF NOT EXISTS pagos_proveedores (
+                                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                proveedor_id INTEGER,
+                                monto REAL NOT NULL,
+                                fecha TEXT NOT NULL,
+                                descripcion TEXT,
+                                deuda_proveedor_id INTEGER
+                            )
+                        """)
+                        cur.execute("""
+                            INSERT INTO pagos_proveedores (proveedor_id, deuda_proveedor_id, monto, fecha, descripcion)
+                            VALUES (?, ?, ?, ?, ?)
+                        """, (int(proveedores_map[prov_name]), int(compra_id), float(aplica), fecha_val, desc_txt or "Abono a compra"))
+                        cur.execute("UPDATE deudas_proveedores SET saldo = MAX(saldo - ?, 0) WHERE id = ?",
+                                    (float(aplica), int(compra_id)))
+                    else:
+                        # 3) Flujo viejo con 'compras' (si tienes saldo_col/estado_col)
+                        cols_c = {r[1] for r in conn.execute("PRAGMA table_info(compras)").fetchall()}
+                        saldo_col = "saldo_pendiente" if "saldo_pendiente" in cols_c else ("deuda_restante" if "deuda_restante" in cols_c else None)
+                        estado_col = "estado" if "estado" in cols_c else None
+                        total_col  = "total" if "total" in cols_c else ("monto_total" if "monto_total" in cols_c else None)
+                        if saldo_col:
+                            cur.execute(f"UPDATE compras SET {saldo_col} = MAX({saldo_col} - ?, 0) WHERE id = ?", (float(monto), int(compra_id)))
+                            if estado_col:
+                                cur.execute(f"UPDATE compras SET {estado_col} = 'PAGADA' WHERE id = ? AND ({saldo_col} <= 0.000001)", (int(compra_id),))
+                        elif total_col and estado_col:
+                            cur.execute(f"UPDATE compras SET {estado_col} = CASE WHEN ? >= {total_col} THEN 'PAGADA' ELSE {estado_col} END WHERE id = ?", (float(monto), int(compra_id)))
+
+                self.cargar_gastos((self.buscar_entry.get() or "").strip())
+                messagebox.showinfo("Éxito", "Abono registrado.", parent=win)
+                win.destroy()
+            except Exception as e:
+                messagebox.showerror("Error", f"No se pudo registrar el abono.\n{e}", parent=win)
+
+
+        ttk.Button(win, text="Guardar", command=guardar, style="Success.TButton").grid(row=5, column=0, columnspan=3, pady=10)
+        win.bind("<Return>", guardar)
+
 
     # -------------------------------------------------------
     # Registro / listado
@@ -433,33 +740,38 @@ class GastosFrame(tk.Frame):
         self.tree.delete(*self.tree.get_children())
         try:
             with get_connection() as conn:
-                if self._gastos_has_empleado_fk or self._gastos_has_cliente_fk:
+                if self._gastos_has_empleado_fk or self._gastos_has_cliente_fk or self._gastos_has_proveedor_fk:
                     emp_sel = ", e.nombre AS empleado" if self._gastos_has_empleado_fk else ""
                     cli_sel = ", c.nombre AS cliente" if self._gastos_has_cliente_fk else ""
+                    prv_sel = ", pr.nombre AS proveedor" if self._gastos_has_proveedor_fk else ""
+
                     emp_join = "LEFT JOIN empleados e ON e.id = g.empleado_id" if self._gastos_has_empleado_fk else ""
                     cli_join = "LEFT JOIN clientes  c ON c.id = g.cliente_id"  if self._gastos_has_cliente_fk else ""
+                    prv_join = "LEFT JOIN proveedores pr ON pr.id = g.proveedor_id" if self._gastos_has_proveedor_fk else ""
+
                     base_sql = f"""
                         SELECT g.id, g.tipo, g.monto, g.descripcion, g.fecha
-                               {emp_sel} {cli_sel}
+                            {emp_sel}{cli_sel}{prv_sel}
                         FROM gastos g
-                        {emp_join} {cli_join}
+                        {emp_join} {cli_join} {prv_join}
                     """
+
                     if filtro:
                         like = f"%{filtro}%"
-                        parts, params = [], []
-                        parts.append("(g.tipo LIKE ? OR g.descripcion LIKE ?)")
-                        params += [like, like]
+                        parts = ["(g.tipo LIKE ? OR g.descripcion LIKE ?)"]
+                        params = [like, like]
                         if self._gastos_has_empleado_fk:
-                            parts.append("e.nombre LIKE ?")
-                            params.append(like)
+                            parts.append("e.nombre LIKE ?"); params.append(like)
                         if self._gastos_has_cliente_fk:
-                            parts.append("c.nombre LIKE ?")
-                            params.append(like)
+                            parts.append("c.nombre LIKE ?"); params.append(like)
+                        if self._gastos_has_proveedor_fk:
+                            parts.append("pr.nombre LIKE ?"); params.append(like)
                         sql = base_sql + f" WHERE {' OR '.join(parts)} ORDER BY g.fecha DESC"
                         rows = conn.execute(sql, tuple(params)).fetchall()
                     else:
                         rows = conn.execute(base_sql + " ORDER BY g.fecha DESC").fetchall()
                 else:
+                    # modo básico sin joins
                     if filtro:
                         like = f"%{filtro}%"
                         rows = conn.execute("""
@@ -474,24 +786,32 @@ class GastosFrame(tk.Frame):
                             FROM gastos
                             ORDER BY fecha DESC
                         """).fetchall()
-
+                        
                 for r in rows:
-                    # Compatibilidad row_factory (tuple/dict)
-                    rid   = r[0] if isinstance(r, tuple) else r["id"]
-                    tipo  = r[1] if isinstance(r, tuple) else r["tipo"]
-                    monto = r[2] if isinstance(r, tuple) else r["monto"]
-                    descr = r[3] if isinstance(r, tuple) else r["descripcion"]
-                    fecha = r[4] if isinstance(r, tuple) else r["fecha"]
-                    vals = [rid, tipo, formato_moneda(monto), descr or "", fecha]
+                    rid   = r[0]
+                    tipo  = r[1]
+                    monto = r[2]
+                    descr = r[3]
+                    fecha = r[4]
+
+                    vals = [rid, tipo, formato_moneda(monto or 0), (descr or ""), fecha]
+
+                    idx = 5  # después de las 5 columnas base
                     if self._gastos_has_empleado_fk:
-                        emp = (r[5] if isinstance(r, tuple) and len(r) > 5 else (r.get("empleado", "") if not isinstance(r, tuple) else ""))
+                        emp = r[idx] if len(r) > idx else ""
                         vals.append(emp or "")
+                        idx += 1
                     if self._gastos_has_cliente_fk:
-                        # índice siguiente (6) si hay empleado; si no, (5)
-                        idx = 6 if self._gastos_has_empleado_fk else 5
-                        cli = (r[idx] if isinstance(r, tuple) and len(r) > idx else (r.get("cliente", "") if not isinstance(r, tuple) else ""))
+                        cli = r[idx] if len(r) > idx else ""
                         vals.append(cli or "")
+                        idx += 1
+                    if self._gastos_has_proveedor_fk:
+                        prv = r[idx] if len(r) > idx else ""
+                        vals.append(prv or "")
+
                     self.tree.insert("", "end", values=tuple(vals))
+
+
 
             set_treeview_stripes(self.tree, even_bg=PALETTE.get("alt_row"), odd_bg=PALETTE.get("panel"))
         except Exception as e:
