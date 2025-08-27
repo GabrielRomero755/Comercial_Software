@@ -1089,15 +1089,19 @@ class ReportesFrame(tk.Frame):
                 cur = conn.cursor()
                 cur.execute("SELECT id, nombre FROM proveedores ORDER BY nombre COLLATE NOCASE")
                 rows = cur.fetchall()
-            self._prov_map = {nombre: pid for pid, nombre in rows}
+            # Map con opción global
+            self._prov_map = {"— Todos —": None}
+            for pid, nombre in rows:
+                self._prov_map[nombre] = pid
             self.combo_prov["values"] = list(self._prov_map.keys())
-            if rows:
-                if not self.combo_prov.get():
-                    self.combo_prov.current(0)
-            else:
+            if self.combo_prov.get() not in self._prov_map:
+                # Por defecto, “Todos” si hay datos; si no hay proveedores, igual se verá “— Todos —”
+                self.combo_prov.set("— Todos —")
+            if not rows:
                 messagebox.showinfo("Proveedores", "No hay proveedores cargados.")
         except Exception as e:
             messagebox.showerror("Error", f"No se pudieron cargar proveedores.\n{e}")
+
 
     def generar_deudas_proveedor(self):
         self.tree_prov_comp.delete(*self.tree_prov_comp.get_children())
@@ -1110,7 +1114,7 @@ class ReportesFrame(tk.Frame):
         if not prov_nom:
             messagebox.showwarning("Proveedor", "Selecciona un proveedor.")
             return
-        prov_id = self._prov_map.get(prov_nom)
+        prov_id = self._prov_map.get(prov_nom, None)  # None => “— Todos —”
 
         rango = self._leer_rango(self.prov_fecha_ini, self.prov_fecha_fin)
         if not rango:
@@ -1126,54 +1130,110 @@ class ReportesFrame(tk.Frame):
             with get_connection() as conn:
                 cur = conn.cursor()
                 # Compras a crédito (deudas)
-                cur.execute("""
-                    SELECT dp.fecha, IFNULL(prod.nombre,''), dp.monto, dp.saldo, IFNULL(dp.descripcion,'')
-                    FROM deudas_proveedores dp
-                    LEFT JOIN productos prod ON prod.id = dp.producto_id
-                    WHERE dp.proveedor_id = ? AND DATE(dp.fecha) BETWEEN ? AND ?
-                    ORDER BY dp.fecha DESC
-                """, (prov_id, f1, f2))
-                comp = cur.fetchall()
+                if prov_id is None:
+                    # TODOS los proveedores: traemos también el nombre del proveedor para prefijar la descripción
+                    cur.execute("""
+                        SELECT dp.fecha, IFNULL(prod.nombre,''), dp.monto, dp.saldo, IFNULL(dp.descripcion,''), IFNULL(prov.nombre,'')
+                        FROM deudas_proveedores dp
+                        LEFT JOIN productos prod ON prod.id = dp.producto_id
+                        LEFT JOIN proveedores prov ON prov.id = dp.proveedor_id
+                        WHERE DATE(dp.fecha) BETWEEN ? AND ?
+                        ORDER BY dp.fecha DESC
+                    """, (f1, f2))
+                    comp = cur.fetchall()
+                else:
+                    cur.execute("""
+                        SELECT dp.fecha, IFNULL(prod.nombre,''), dp.monto, dp.saldo, IFNULL(dp.descripcion,'')
+                        FROM deudas_proveedores dp
+                        LEFT JOIN productos prod ON prod.id = dp.producto_id
+                        WHERE dp.proveedor_id = ? AND DATE(dp.fecha) BETWEEN ? AND ?
+                        ORDER BY dp.fecha DESC
+                    """, (prov_id, f1, f2))
+                    comp = cur.fetchall()
 
                 # Pagos a proveedor (opcional)
                 pagos = []
                 if self._has_pagos_prov:
                     cols = self._columns_in("pagos_proveedores")
-                    # Estrategias de join según esquema disponible
-                    if "proveedor_id" in cols:
-                        cur.execute("""
-                            SELECT fecha, IFNULL(descripcion,''), monto
-                            FROM pagos_proveedores
-                            WHERE proveedor_id = ? AND DATE(fecha) BETWEEN ? AND ?
-                            ORDER BY fecha DESC
-                        """, (prov_id, f1, f2))
-                        pagos = cur.fetchall()
-                    elif "deuda_proveedor_id" in cols:
-                        cur.execute("""
-                            SELECT pp.fecha, IFNULL(pp.descripcion,''), pp.monto
-                            FROM pagos_proveedores pp
-                            WHERE DATE(pp.fecha) BETWEEN ? AND ?
-                              AND pp.deuda_proveedor_id IN (
-                                  SELECT id FROM deudas_proveedores
-                                  WHERE proveedor_id = ?
-                              )
-                            ORDER BY pp.fecha DESC
-                        """, (f1, f2, prov_id))
-                        pagos = cur.fetchall()
+                    if prov_id is None:
+                        # TODOS los proveedores
+                        if "proveedor_id" in cols:
+                            cur.execute("""
+                                SELECT pp.fecha, IFNULL(pp.descripcion,''), pp.monto, IFNULL(prov.nombre,'')
+                                FROM pagos_proveedores pp
+                                LEFT JOIN proveedores prov ON prov.id = pp.proveedor_id
+                                WHERE DATE(pp.fecha) BETWEEN ? AND ?
+                                ORDER BY pp.fecha DESC
+                            """, (f1, f2))
+                            pagos = cur.fetchall()
+                        elif "deuda_proveedor_id" in cols:
+                            # enlazar a deudas_proveedores -> proveedores
+                            cur.execute("""
+                                SELECT pp.fecha, IFNULL(pp.descripcion,''), pp.monto, IFNULL(prov.nombre,'')
+                                FROM pagos_proveedores pp
+                                JOIN deudas_proveedores dp ON dp.id = pp.deuda_proveedor_id
+                                LEFT JOIN proveedores prov ON prov.id = dp.proveedor_id
+                                WHERE DATE(pp.fecha) BETWEEN ? AND ?
+                                ORDER BY pp.fecha DESC
+                            """, (f1, f2))
+                            pagos = cur.fetchall()
+                    else:
+                        # Un proveedor específico (misma lógica anterior)
+                        if "proveedor_id" in cols:
+                            cur.execute("""
+                                SELECT fecha, IFNULL(descripcion,''), monto
+                                FROM pagos_proveedores
+                                WHERE proveedor_id = ? AND DATE(fecha) BETWEEN ? AND ?
+                                ORDER BY fecha DESC
+                            """, (prov_id, f1, f2))
+                            pagos = cur.fetchall()
+                        elif "deuda_proveedor_id" in cols:
+                            cur.execute("""
+                                SELECT pp.fecha, IFNULL(pp.descripcion,''), pp.monto
+                                FROM pagos_proveedores pp
+                                WHERE DATE(pp.fecha) BETWEEN ? AND ?
+                                AND pp.deuda_proveedor_id IN (
+                                    SELECT id FROM deudas_proveedores
+                                    WHERE proveedor_id = ?
+                                )
+                                ORDER BY pp.fecha DESC
+                            """, (f1, f2, prov_id))
+                            pagos = cur.fetchall()
 
             # Cargar tablas
             saldo_total = 0.0
-            for fecha, prod, monto, saldo, desc in comp:
-                m = redondear_dos_decimales(monto or 0.0)
-                s = redondear_dos_decimales(saldo or 0.0)
-                self.tree_prov_comp.insert("", "end", values=(formatear_fecha(fecha), prod, formato_moneda(m), formato_moneda(s), desc))
-                self.deudas_prov_comp_rows.append((str(fecha), prod, float(m), float(s), desc))
-                saldo_total += s
-
-            for fecha, desc, monto in pagos:
-                mo = redondear_dos_decimales(monto or 0.0)
-                self.tree_prov_pagos.insert("", "end", values=(formatear_fecha(fecha), desc, formato_moneda(mo)))
-                self.deudas_prov_pagos_rows.append((str(fecha), desc, float(mo)))
+            if prov_id is None:
+                # TODOS: prefijar proveedor en descripción
+                for r in comp:
+                    fecha, prod, monto, saldo, desc, prov = r
+                    m = redondear_dos_decimales(monto or 0.0)
+                    s = redondear_dos_decimales(saldo or 0.0)
+                    desc2 = f"[{prov}] {desc}".strip()
+                    self.tree_prov_comp.insert("", "end", values=(formatear_fecha(fecha), prod, formato_moneda(m), formato_moneda(s), desc2))
+                    self.deudas_prov_comp_rows.append((str(fecha), prod, float(m), float(s), desc2))
+                    saldo_total += s
+                for r in pagos:
+                    fecha, desc, monto, prov = r
+                    mo = redondear_dos_decimales(monto or 0.0)
+                    desc2 = f"[{prov}] {desc}".strip()
+                    self.tree_prov_pagos.insert("", "end", values=(formatear_fecha(fecha), desc2, formato_moneda(mo)))
+                    self.deudas_prov_pagos_rows.append((str(fecha), desc2, float(mo)))
+            else:
+                # Un solo proveedor (como antes)
+                for fecha, prod, monto, saldo, desc in comp:
+                    m = redondear_dos_decimales(monto or 0.0)
+                    s = redondear_dos_decimales(saldo or 0.0)
+                    self.tree_prov_comp.insert("", "end", values=(formatear_fecha(fecha), prod, formato_moneda(m), formato_moneda(s), desc))
+                    self.deudas_prov_comp_rows.append((str(fecha), prod, float(m), float(s), desc))
+                    saldo_total += s
+                for fila in pagos:
+                    if len(fila) == 3:
+                        fecha, desc, monto = fila
+                    else:
+                        fecha, desc, monto, _ = fila
+                    mo = redondear_dos_decimales(monto or 0.0)
+                    self.tree_prov_pagos.insert("", "end", values=(formatear_fecha(fecha), desc, formato_moneda(mo)))
+                    self.deudas_prov_pagos_rows.append((str(fecha), desc, float(mo)))
 
             self.total_saldo_proveedor = redondear_dos_decimales(saldo_total)
 
@@ -1187,6 +1247,7 @@ class ReportesFrame(tk.Frame):
 
         except Exception as e:
             messagebox.showerror("Error", f"No se pudo generar el reporte de proveedor.\n{e}")
+
 
     def exportar_csv_deudas_prov(self):
         if not (self.deudas_prov_comp_rows or self.deudas_prov_pagos_rows):
@@ -1517,15 +1578,18 @@ class ReportesFrame(tk.Frame):
                 cur = conn.cursor()
                 cur.execute("SELECT id, nombre FROM clientes ORDER BY nombre COLLATE NOCASE")
                 rows = cur.fetchall()
-            self._cli_map = {nombre: cid for cid, nombre in rows}
+            # Map con opción global
+            self._cli_map = {"— Todos —": None}
+            for cid, nombre in rows:
+                self._cli_map[nombre] = cid
             self.combo_cli["values"] = list(self._cli_map.keys())
-            if rows:
-                if not self.combo_cli.get():
-                    self.combo_cli.current(0)
-            else:
+            if self.combo_cli.get() not in self._cli_map:
+                self.combo_cli.set("— Todos —")
+            if not rows:
                 messagebox.showinfo("Clientes", "No hay clientes cargados.")
         except Exception as e:
             messagebox.showerror("Error", f"No se pudieron cargar clientes.\n{e}")
+
 
     def _set_info_cliente(self, cid: int):
         try:
@@ -1557,30 +1621,48 @@ class ReportesFrame(tk.Frame):
         if not cli_nom:
             messagebox.showwarning("Cliente", "Selecciona un cliente.")
             return
-        cid = self._cli_map.get(cli_nom)
+        cid = self._cli_map.get(cli_nom, None)  # None => “— Todos —”
 
         rango = self._leer_rango(self.cli_fecha_ini, self.cli_fecha_fin)
         if not rango:
             return
         f1, f2 = rango
 
-        self._set_info_cliente(cid)
+        # Info (solo si es un cliente puntual)
+        if cid is not None:
+            self._set_info_cliente(cid)
+        else:
+            self.lbl_info_cliente.config(text="Tel.: s/d | Dirección: s/d")
 
         try:
             # 1) Ventas a crédito en el rango
             with get_connection() as conn:
                 cur = conn.cursor()
-                cur.execute("""
-                    SELECT v.fecha, p.nombre, COALESCE(v.unidades,0), COALESCE(v.kilos,0),
-                        COALESCE(v.precio,0), COALESCE(v.total, v.kilos * v.precio)
-                    FROM ventas v
-                    JOIN productos p ON p.id = v.producto_id
-                    WHERE v.tipo_venta = 'credito'
-                    AND v.cliente_id = ?
-                    AND DATE(v.fecha) BETWEEN ? AND ?
-                    ORDER BY v.fecha DESC
-                """, (cid, f1, f2))
-                vtas = cur.fetchall()
+                if cid is None:
+                    # TODOS: incluir nombre del cliente para injertarlo en “Producto”
+                    cur.execute("""
+                        SELECT v.fecha, p.nombre, COALESCE(v.unidades,0), COALESCE(v.kilos,0),
+                            COALESCE(v.precio,0), COALESCE(v.total, v.kilos * v.precio), IFNULL(c.nombre,'')
+                        FROM ventas v
+                        JOIN productos p ON p.id = v.producto_id
+                        LEFT JOIN clientes c ON c.id = v.cliente_id
+                        WHERE v.tipo_venta = 'credito'
+                        AND DATE(v.fecha) BETWEEN ? AND ?
+                        ORDER BY v.fecha DESC
+                    """, (f1, f2))
+                    vtas = cur.fetchall()
+                else:
+                    cur.execute("""
+                        SELECT v.fecha, p.nombre, COALESCE(v.unidades,0), COALESCE(v.kilos,0),
+                            COALESCE(v.precio,0), COALESCE(v.total, v.kilos * v.precio)
+                        FROM ventas v
+                        JOIN productos p ON p.id = v.producto_id
+                        WHERE v.tipo_venta = 'credito'
+                        AND v.cliente_id = ?
+                        AND DATE(v.fecha) BETWEEN ? AND ?
+                        ORDER BY v.fecha DESC
+                    """, (cid, f1, f2))
+                    vtas = cur.fetchall()
 
             # 2) Pagos del cliente (usa tabla singular/plural si existe) + saldo actual
             pagos = []
@@ -1591,53 +1673,96 @@ class ReportesFrame(tk.Frame):
                 if self._pagos_cli_table:
                     cols = self._columns_in(self._pagos_cli_table)
 
-                    if "cliente_id" in cols:
-                        # Detectar columna de descripción (si no existe, usar cadena vacía)
-                        desc_candidates = ["descripcion", "detalle", "concepto", "nota", "observacion", "observaciones"]
-                        monto_candidates = ["monto", "importe", "pago", "cantidad", "valor"]
+                    if cid is None:
+                        # TODOS los clientes
+                        if "cliente_id" in cols:
+                            # detectar columna de descripción y monto como antes
+                            desc_candidates = ["descripcion", "detalle", "concepto", "nota", "observacion", "observaciones"]
+                            monto_candidates = ["monto", "importe", "pago", "cantidad", "valor"]
+                            desc_col = next((c for c in desc_candidates if c in cols), None)
+                            monto_col = next((c for c in monto_candidates if c in cols), None)
+                            desc_expr = f"IFNULL({desc_col},'')" if desc_col else "''"
+                            monto_expr = monto_col if monto_col else "0"
+                            cur.execute(
+                                f"""
+                                SELECT p.fecha, {desc_expr} AS descripcion, {monto_expr} AS monto, IFNULL(c.nombre,'')
+                                FROM {self._pagos_cli_table} p
+                                LEFT JOIN clientes c ON c.id = p.cliente_id
+                                WHERE DATE(p.fecha) BETWEEN ? AND ?
+                                ORDER BY p.fecha DESC
+                                """,
+                                (f1, f2)
+                            )
+                            pagos = cur.fetchall()
+                    else:
+                        # Un cliente puntual
+                        if "cliente_id" in cols:
+                            desc_candidates = ["descripcion", "detalle", "concepto", "nota", "observacion", "observaciones"]
+                            monto_candidates = ["monto", "importe", "pago", "cantidad", "valor"]
+                            desc_col = next((c for c in desc_candidates if c in cols), None)
+                            monto_col = next((c for c in monto_candidates if c in cols), None)
+                            desc_expr = f"IFNULL({desc_col},'')" if desc_col else "''"
+                            monto_expr = monto_col if monto_col else "0"
+                            cur.execute(
+                                f"""
+                                SELECT fecha, {desc_expr} AS descripcion, {monto_expr} AS monto
+                                FROM {self._pagos_cli_table}
+                                WHERE cliente_id = ? AND DATE(fecha) BETWEEN ? AND ?
+                                ORDER BY fecha DESC
+                                """,
+                                (cid, f1, f2)
+                            )
+                            pagos = cur.fetchall()
 
-                        desc_col = next((c for c in desc_candidates if c in cols), None)
-                        monto_col = next((c for c in monto_candidates if c in cols), None)
-
-                        desc_expr = f"IFNULL({desc_col},'')" if desc_col else "''"
-                        monto_expr = monto_col if monto_col else "0"
-
-                        cur.execute(
-                            f"""
-                            SELECT fecha, {desc_expr} AS descripcion, {monto_expr} AS monto
-                            FROM {self._pagos_cli_table}
-                            WHERE cliente_id = ? AND DATE(fecha) BETWEEN ? AND ?
-                            ORDER BY fecha DESC
-                            """,
-                            (cid, f1, f2)
-                        )
-                        pagos = cur.fetchall()
-
-                # Siempre lee el saldo "live" del cliente
-                cur.execute("SELECT COALESCE(deuda_total,0) FROM clientes WHERE id = ?", (cid,))
-                saldo_actual = float((cur.fetchone() or (0.0,))[0])
-
+                # Saldo actual:
+                if cid is None:
+                    cur.execute("SELECT COALESCE(SUM(COALESCE(deuda_total,0)),0) FROM clientes")
+                    saldo_actual = float((cur.fetchone() or (0.0,))[0] or 0.0)
+                else:
+                    cur.execute("SELECT COALESCE(deuda_total,0) FROM clientes WHERE id = ?", (cid,))
+                    saldo_actual = float((cur.fetchone() or (0.0,))[0] or 0.0)
 
             # 3) Pintar ventas
             total_imp = 0.0
-            for fecha, prod, un, kg, precio, total in vtas:
-                un = float(un or 0); kg = float(kg or 0)
-                pr = redondear_dos_decimales(precio or 0)
-                tt = redondear_dos_decimales(total or (kg * pr))
-                total_imp += tt
-                self.tree_cli_vtas.insert("", "end", values=(
-                    formatear_fecha(fecha), prod, f"{redondear_dos_decimales(un):.2f}",
-                    f"{redondear_dos_decimales(kg):.2f}", formato_moneda(pr), formato_moneda(tt)
-                ))
-                self.cliente_credito_rows.append((str(fecha), prod, float(un), float(kg), float(pr), float(tt)))
+            if cid is None:
+                for fecha, prod, un, kg, precio, total, cli_name in vtas:
+                    un = float(un or 0); kg = float(kg or 0)
+                    pr = redondear_dos_decimales(precio or 0)
+                    tt = redondear_dos_decimales(total or (kg * pr))
+                    total_imp += tt
+                    prod_inj = f"{prod} [{cli_name}]".strip()
+                    self.tree_cli_vtas.insert("", "end", values=(
+                        formatear_fecha(fecha), prod_inj, f"{redondear_dos_decimales(un):.2f}",
+                        f"{redondear_dos_decimales(kg):.2f}", formato_moneda(pr), formato_moneda(tt)
+                    ))
+                    self.cliente_credito_rows.append((str(fecha), prod_inj, float(un), float(kg), float(pr), float(tt)))
+            else:
+                for fecha, prod, un, kg, precio, total in vtas:
+                    un = float(un or 0); kg = float(kg or 0)
+                    pr = redondear_dos_decimales(precio or 0)
+                    tt = redondear_dos_decimales(total or (kg * pr))
+                    total_imp += tt
+                    self.tree_cli_vtas.insert("", "end", values=(
+                        formatear_fecha(fecha), prod, f"{redondear_dos_decimales(un):.2f}",
+                        f"{redondear_dos_decimales(kg):.2f}", formato_moneda(pr), formato_moneda(tt)
+                    ))
+                    self.cliente_credito_rows.append((str(fecha), prod, float(un), float(kg), float(pr), float(tt)))
 
             # 4) Pintar pagos
             total_pagos = 0.0
-            for fecha, desc, monto in pagos:
-                mo = redondear_dos_decimales(monto or 0.0)
-                total_pagos += mo
-                self.tree_cli_pagos.insert("", "end", values=(formatear_fecha(fecha), desc, formato_moneda(mo)))
-                self.cliente_pagos_rows.append((str(fecha), desc, float(mo)))
+            if cid is None:
+                for fecha, desc, monto, cli_name in (pagos or []):
+                    mo = redondear_dos_decimales(monto or 0.0)
+                    total_pagos += mo
+                    desc2 = f"[{cli_name}] {desc}".strip()
+                    self.tree_cli_pagos.insert("", "end", values=(formatear_fecha(fecha), desc2, formato_moneda(mo)))
+                    self.cliente_pagos_rows.append((str(fecha), desc2, float(mo)))
+            else:
+                for fecha, desc, monto in (pagos or []):
+                    mo = redondear_dos_decimales(monto or 0.0)
+                    total_pagos += mo
+                    self.tree_cli_pagos.insert("", "end", values=(formatear_fecha(fecha), desc, formato_moneda(mo)))
+                    self.cliente_pagos_rows.append((str(fecha), desc, float(mo)))
 
             # 5) Totales
             self.total_importe_cliente = redondear_dos_decimales(total_imp)
@@ -1660,6 +1785,7 @@ class ReportesFrame(tk.Frame):
 
         except Exception as e:
             messagebox.showerror("Error", f"No se pudo generar la vista de deudas del cliente.\n{e}")
+    
    
 
     def exportar_csv_deudas_cli(self):

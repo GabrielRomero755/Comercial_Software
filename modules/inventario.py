@@ -348,6 +348,28 @@ class InventarioFrame(tk.Frame):
             "Motivo":     "str",
             "Fecha":      "date",
         })
+        
+        # === DEUDAS ACTIVAS (siempre visibles) ===
+        da_panel = self._panel(root, pady=8, padx=8, fill="both", expand=False)
+        self._title(da_panel, "Deudas activas")
+
+        da_top = tk.Frame(da_panel, bg=PALETTE["panel"]); da_top.pack(fill="x", padx=8, pady=(0,6))
+        tk.Label(da_top, text="Proveedor:", bg=PALETTE["panel"], fg=PALETTE["text"]).pack(side="left", padx=(0,6))
+        self.da_prov_filtro = self._combobox(da_top, width=26); self.da_prov_filtro.pack(side="left")
+        self.da_prov_filtro.bind("<<ComboboxSelected>>", lambda _e: self._cargar_deudas_activas())
+        ttk.Button(da_top, text="Limpiar", command=lambda: (self.da_prov_filtro.set("(todos)"),
+                                                            self._cargar_deudas_activas()))\
+            .pack(side="left", padx=(8,0))
+
+        da_tab = tk.Frame(da_panel, bg=PALETTE["panel"]); da_tab.pack(fill="both", expand=True, padx=8, pady=(6,0))
+        cols_da = ("Fecha","Proveedor","Producto","Saldo","DeudaID")
+        self.tree_deudas_activas, _, _ = self._tree_with_scrolls(da_tab, cols_da, height=6)
+        for col, w, a in (("Fecha",120,"center"),("Proveedor",220,"w"),("Producto",220,"w"),
+                          ("Saldo",120,"e"),("DeudaID",80,"center")):
+            self.tree_deudas_activas.heading(col, text=col)
+            self.tree_deudas_activas.column(col, width=w, anchor=a, stretch=(col in ("Proveedor","Producto")))
+
+
     # === CxP por compra (deudas <-> pagos) ===
         cxp_panel = self._panel(root, pady=8, padx=8, fill="both", expand=True)
         self._title(cxp_panel, "Gestión de Cuentas por Pagar por Compra")
@@ -447,6 +469,78 @@ class InventarioFrame(tk.Frame):
             self.tree_prov.heading(col, text=col)
             self.tree_prov.column(col, width=w, anchor=a, stretch=(col in ("Nombre", "Dirección")))
         self.tree_prov.bind("<Double-1>", lambda e: self.editar_proveedor())    
+        
+    def _cargar_deudas_activas(self):
+        """Lista deudas_proveedores con saldo > 0, filtrable por proveedor, sin rango de fechas."""
+        if not getattr(self, "_has_deudas_prov", False):
+            if hasattr(self, "tree_deudas_activas"):
+                self.tree_deudas_activas.delete(*self.tree_deudas_activas.get_children())
+            return
+        # limpiar
+        try:
+            self.tree_deudas_activas.delete(*self.tree_deudas_activas.get_children())
+        except Exception:
+            return
+
+        prov_sel = (self.da_prov_filtro.get() or "").strip()
+        prov_id = None
+        if prov_sel and prov_sel != "(todos)":
+            prov_id = self.proveedores.get(prov_sel)
+
+        try:
+            with get_connection() as conn:
+                cur = conn.cursor()
+                sql = """
+                    SELECT d.id, d.fecha, pr.nombre AS proveedor, IFNULL(p.nombre,'') AS producto, d.saldo
+                    FROM deudas_proveedores d
+                    JOIN proveedores pr ON pr.id = d.proveedor_id
+                    LEFT JOIN productos   p ON p.id = d.producto_id
+                    WHERE d.saldo > 0
+                """
+                params = []
+                if prov_id:
+                    sql += " AND d.proveedor_id = ?"
+                    params.append(int(prov_id))
+                sql += " ORDER BY d.fecha ASC, d.id ASC"
+                cur.execute(sql, tuple(params))
+                rows = cur.fetchall()
+
+            for deuda_id, fecha, proveedor, producto, saldo in rows:
+                self.tree_deudas_activas.insert("", "end", values=(
+                    (fecha.split(" ")[0] if fecha else ""),
+                    proveedor or "",
+                    producto or "",
+                    formato_moneda(float(saldo or 0.0)),
+                    int(deuda_id),
+                ))
+
+        except Exception as e:
+            messagebox.showerror("Deudas activas", f"No se pudieron cargar.\n{e}")
+        
+        def _abonar_desde_activas(_e=None):
+            sel = self.tree_deudas_activas.selection()
+            if not sel:
+                return
+            deuda_id = int(self.tree_deudas_activas.item(sel[0], "values")[4])
+
+            # (Opcional) intenta resaltar la misma deuda en la grilla de CxP si estuviera visible,
+            # pero NO dependemos de esto para abrir el diálogo.
+            try:
+                for iid in self.tree_cxp_deudas.get_children(""):
+                    if int(self.tree_cxp_deudas.item(iid, "values")[5]) == deuda_id:
+                        self.tree_cxp_deudas.selection_set(iid)
+                        self.tree_cxp_deudas.focus(iid)
+                        break
+            except Exception:
+                pass
+
+            # Llamada independiente del calendario/rango:
+            self._abonar_compra_seleccionada(deuda_id)
+
+
+        self.tree_deudas_activas.bind("<Double-1>", _abonar_desde_activas)
+
+    
     # ====== CxP por compra (deudas <-> pagos) ======
     def _pick_date(self, entry_widget):
         """Abre el calendario; al elegir fecha llena el Entry y recarga la grilla."""
@@ -554,9 +648,13 @@ class InventarioFrame(tk.Frame):
             # Silencioso: si la tabla aún no tiene FK deuda_proveedor_id
             pass
 
-    def _abonar_compra_seleccionada(self):
+    def _abonar_compra_seleccionada(self, deuda_id=None):
         """Abre un diálogo y registra un pago exactamente sobre la deuda seleccionada."""
-        deuda_id = self._deuda_seleccionada()
+        if deuda_id is None:
+            deuda_id = self._deuda_seleccionada()
+            if not deuda_id:
+                messagebox.showinfo("Abonar", "Selecciona primero una compra en la lista de deudas.")
+                return
         if not deuda_id:
             messagebox.showinfo("Abonar", "Selecciona primero una compra en la lista de deudas.")
             return
@@ -646,6 +744,8 @@ class InventarioFrame(tk.Frame):
                 win.destroy()
                 self._cargar_cxp_creditos()
                 self._cargar_pagos_por_deuda()
+                self._cargar_deudas_activas()
+
             except Exception as e:
                 messagebox.showerror("Error", f"No se pudo registrar el abono.\n{e}", parent=win)
         
@@ -663,6 +763,7 @@ class InventarioFrame(tk.Frame):
         except Exception: pass
         try: win.focus_force()
         except Exception: pass
+        
     def _abrir_crud_abonos(self):
         """Ventana CRUD para pagos_proveedores con ajuste automático del saldo de la deuda vinculada."""
         win = tk.Toplevel(self)
@@ -799,6 +900,8 @@ class InventarioFrame(tk.Frame):
                     w.destroy()
                     self._cargar_cxp_creditos()
                     self._cargar_pagos_por_deuda()
+                    self._cargar_deudas_activas()
+                    
                     # refrescar tabla local
                     for iid in tree.get_children(""):
                         if int(tree.item(iid, "values")[0]) == pid:
@@ -848,6 +951,8 @@ class InventarioFrame(tk.Frame):
                 if it: tree.delete(it)
                 self._cargar_cxp_creditos()
                 self._cargar_pagos_por_deuda()
+                self._cargar_deudas_activas()
+                
             except Exception as e:
                 messagebox.showerror("Error", f"No se pudo eliminar.\n{e}", parent=win)
 
@@ -874,14 +979,20 @@ class InventarioFrame(tk.Frame):
         self.cargar_productos()
         self.cargar_proveedores()
         self.cargar_movimientos()
-
-        # Filtros CxP por compra: proveedor + rango por defecto (día de hoy)
+        
+        # Combobox de deudas activas
         try:
-            self.cxp_prov_filtro["values"] = ["(todos)"] + list(self.proveedores.keys())
-            if not self.cxp_prov_filtro.get():
-                self.cxp_prov_filtro.current(0)
+            self.da_prov_filtro["values"] = ["(todos)"] + list(self.proveedores.keys())
+            if not self.da_prov_filtro.get():
+                self.da_prov_filtro.current(0)
         except Exception:
             pass
+
+        # Cargar la sección fija
+        self._cargar_deudas_activas()
+
+
+        # Filtros CxP por compra: proveedor + rango por defecto (día de hoy)
 
         hoy = datetime.now().strftime("%Y-%m-%d")
         try:
@@ -1291,6 +1402,8 @@ class InventarioFrame(tk.Frame):
                 e.delete(0, tk.END)
             self.cargar_movimientos()
             self._actualizar_info_producto(nombre)
+            self._cargar_deudas_activas()
+
 
         except Exception as e:
             messagebox.showerror("Error", f"No se pudo registrar la entrada.\n{e}")
@@ -1488,6 +1601,8 @@ class InventarioFrame(tk.Frame):
             # Refrescar UI relacionada
             self._actualizar_deuda_proveedor_pago()
             self.cargar_proveedores()
+            self._cargar_deudas_activas()
+
         except Exception as e:
             messagebox.showerror("Error", f"No se pudo registrar el pago.\n{e}")
 
