@@ -1,7 +1,6 @@
 -- 0004_create_pagos_proveedor.sql
 PRAGMA foreign_keys = ON;
 
--- Pagos a proveedores (abonos individuales)
 CREATE TABLE IF NOT EXISTS pagos_proveedor (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     proveedor_id  INTEGER NOT NULL,

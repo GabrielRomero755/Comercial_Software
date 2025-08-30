@@ -1,13 +1,8 @@
 -- 0012_migrate_ventas_new.sql
 PRAGMA foreign_keys = OFF;
 
-BEGIN;
-
 -- 1) Quitar dependencias de 'ventas'
 DROP VIEW IF EXISTS v_ventas_saldo;
--- Si tienes más vistas/triggers que usen 'ventas', dropea aquí también:
--- DROP VIEW IF EXISTS v_otra_vista;
--- DROP TRIGGER IF EXISTS trg_algo_sobre_ventas;
 
 -- 2) Migrar la tabla 'ventas' (permitir producto_id NULL)
 CREATE TABLE ventas_new (
@@ -35,11 +30,11 @@ FROM ventas;
 DROP TABLE ventas;
 ALTER TABLE ventas_new RENAME TO ventas;
 
--- 3) (Re)crear índices si los tenías
+-- 3) (Re)crear índices mínimos si aplica
 -- CREATE INDEX IF NOT EXISTS idx_ventas_fecha ON ventas(fecha);
 
--- 4) Recrear vistas/triggers dependientes (ACTUALIZA con tu definición original)
--- Ajusta los JOINs: usa LEFT JOIN porque producto_id puede ser NULL.
+-- 4) Recrear una vista mínima temporal (si necesitas la “saldo”, 0001 ya la define al inicio;
+--    puedes re-aplicarla en una migración posterior si quieres esa versión final)
 CREATE VIEW v_ventas_saldo AS
 SELECT
   v.id,
@@ -51,7 +46,5 @@ SELECT
 FROM ventas v
 LEFT JOIN clientes  c ON c.id = v.cliente_id
 LEFT JOIN productos p ON p.id = v.producto_id;
-
-COMMIT;
 
 PRAGMA foreign_keys = ON;

@@ -1,9 +1,9 @@
+# db/migrator.py
 # -----------------------------------------------------------
-# Runner de migraciones SQLite
-# - Aplica archivos .sql en db/migrations/ en orden ascendente.
-# - Registra cada archivo aplicado en schema_migrations.
-# - Transaccional por archivo (BEGIN/COMMIT/ROLLBACK).
-# - Seguro para re-ejecución (idempotente por registro).
+# Runner de migraciones SQLite (CLI opcional)
+# - Aplica .sql en db/migrations/ en orden.
+# - Registra en schema_migrations.filename.
+# - Tolerante a scripts con/ sin BEGIN/COMMIT.
 # -----------------------------------------------------------
 
 from __future__ import annotations
@@ -11,33 +11,26 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from typing import Iterable, Set, List, Optional
-
-# Nota: NO importamos db.database a nivel módulo para evitar ciclos.
-#       database.py importará este módulo dentro de init_db().
+from typing import Set, List
 
 MIGRATION_FILE_RE = re.compile(r"^\d+_.+\.sql$", re.IGNORECASE)
 
-
 def _ensure_schema_migrations_table(conn) -> None:
-    """Crea la tabla de registro de migraciones, si no existe."""
     conn.execute("""
         CREATE TABLE IF NOT EXISTS schema_migrations (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            migration_id TEXT    UNIQUE NOT NULL,
+            filename     TEXT    UNIQUE NOT NULL,
             applied_at   TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
         )
     """)
     conn.commit()
 
-
 def _get_applied_migrations(conn) -> Set[str]:
     try:
-        cur = conn.execute("SELECT migration_id FROM schema_migrations")
+        cur = conn.execute("SELECT filename FROM schema_migrations")
         return {row[0] for row in cur.fetchall()}
     except Exception:
         return set()
-
 
 def _list_migration_files(migrations_dir: Path) -> List[Path]:
     if not migrations_dir.exists() or not migrations_dir.is_dir():
@@ -46,20 +39,35 @@ def _list_migration_files(migrations_dir: Path) -> List[Path]:
     files.sort(key=lambda p: p.name.lower())
     return files
 
-
 def _read_sql(path: Path) -> str:
     with open(path, "r", encoding="utf-8") as f:
         return f.read()
 
+import re as _re
+
+def _exec_sql_script_tolerant(conn, sql_text: str) -> None:
+    has_begin = _re.search(r'^\s*BEGIN\b', sql_text, _re.I | _re.M) is not None
+    if has_begin:
+        old_iso = conn.isolation_level
+        conn.isolation_level = None
+        try:
+            conn.executescript(sql_text)
+        finally:
+            conn.isolation_level = old_iso
+    else:
+        sql_text_clean = _re.sub(r'^\s*(COMMIT|ROLLBACK)\s*;?\s*$', '', sql_text, flags=_re.I | _re.M)
+        conn.execute("BEGIN;")
+        try:
+            conn.executescript(sql_text_clean)
+            conn.commit()
+        except Exception:
+            try: conn.rollback()
+            except Exception: pass
+            raise
 
 def apply_all_migrations(conn, migrations_dir: str | os.PathLike) -> int:
-    """
-    Aplica todas las migraciones pendientes encontradas en 'migrations_dir'.
-    Retorna el número de migraciones aplicadas en esta ejecución.
-    """
     migrations_path = Path(migrations_dir)
     _ensure_schema_migrations_table(conn)
-
     applied = _get_applied_migrations(conn)
     pending_files = [p for p in _list_migration_files(migrations_path) if p.name not in applied]
 
@@ -68,31 +76,27 @@ def apply_all_migrations(conn, migrations_dir: str | os.PathLike) -> int:
         sql = _read_sql(path)
         try:
             conn.execute("PRAGMA foreign_keys = ON;")
-            conn.execute("BEGIN;")
-            conn.executescript(sql)
-            conn.execute("INSERT INTO schema_migrations (migration_id) VALUES (?)", (path.name,))
-            conn.execute("COMMIT;")
+            _exec_sql_script_tolerant(conn, sql)
+            conn.execute("INSERT INTO schema_migrations (filename) VALUES (?)", (path.name,))
+            if conn.isolation_level is not None:
+                conn.commit()
             applied_count += 1
             print(f"[migrator] OK  {path.name}")
         except Exception as e:
             try:
-                conn.execute("ROLLBACK;")
+                if conn.isolation_level is not None:
+                    conn.rollback()
             except Exception:
                 pass
             print(f"[migrator] ERR {path.name}: {e}")
-            # Rompemos para que el operador pueda revisar el error
             break
-
     return applied_count
 
-
 if __name__ == "__main__":
-    # Uso CLI opcional: ejecuta migraciones contra la BD por defecto del proyecto
-    from db.database import get_connection  # import tardío para evitar ciclo
+    from db.database import get_connection  # import tardío
 
-    # Intentamos localizar la carpeta de migraciones relativa al paquete
     try:
-        from ui.helpers import resource_path  # para builds con PyInstaller
+        from ui.helpers import resource_path
         migrations_dir = resource_path("db", "migrations")
     except Exception:
         migrations_dir = os.path.join(os.path.dirname(__file__), "migrations")

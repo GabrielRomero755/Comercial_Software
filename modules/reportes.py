@@ -6,13 +6,6 @@
 # Cambios clave en esta versión:
 # - Tema unificado con ui/theme.py (paleta BRAND por defecto).
 # - Reemplazo de botones/entradas tk.* por ttk.* (estilos del tema).
-# - Corrección de Matplotlib (set_xticks antes de set_xticklabels).
-# - Totales en PDFs con formato_moneda para consistencia.
-# - Carpeta por defecto: expansión segura de XDG_DOCUMENTS_DIR.
-# - Combobox popdown estilizado y Treeview con “zebra stripes”.
-# - Robustez extra al cargar combos vacíos y al parsear fechas vacías.
-# - CSV con delimitador explícito y lineterminator consistente.
-# - Botones PDF deshabilitados si ReportLab no está presente.
 # -----------------------------------------------------------
 
 from __future__ import annotations
@@ -65,16 +58,6 @@ try:
     REPORTLAB_OK = True
 except Exception:
     REPORTLAB_OK = False
-
-# Gráficas opcionales (Tk + matplotlib)
-try:
-    import matplotlib
-    matplotlib.use("Agg")  # backend no-interactivo para generar PNG
-    import matplotlib.pyplot as plt
-    MATPLOTLIB_OK = True
-except Exception:
-    MATPLOTLIB_OK = False
-
 
 class ReportesFrame(tk.Frame):
     def __init__(self, master=None, use_dark: bool = False):
@@ -1021,11 +1004,7 @@ class ReportesFrame(tk.Frame):
         self._btn(top, "Generar", "TButton", self.generar_deudas_proveedor, row=0, column=9, padx=6)
         self._btn_pdf_deudas_prov = self._btn(top, "Exportar PDF", "Success.TButton", self.exportar_pdf_deudas_prov, row=0, column=10, padx=4)
         self._btn(top, "Exportar CSV", "Success.TButton", self.exportar_csv_deudas_prov, row=0, column=11, padx=4)
-        
-        
-        self._btn(top, "Gestionar Proveedores", "TButton", self._abrir_crud_proveedores, row=0, column=12, padx=4)
-
-
+       
         # Rápidos
         quick = self._panel(self.tab_deudas_prov, pady=(0, 6), padx=8, fill="x")
         self._btn(quick, "Hoy", "TButton", lambda: self._set_rango_and(self.prov_fecha_ini, self.prov_fecha_fin, *self._rango_hoy(), self.generar_deudas_proveedor)).pack(side="left", padx=4)
@@ -1248,7 +1227,6 @@ class ReportesFrame(tk.Frame):
         except Exception as e:
             messagebox.showerror("Error", f"No se pudo generar el reporte de proveedor.\n{e}")
 
-
     def exportar_csv_deudas_prov(self):
         if not (self.deudas_prov_comp_rows or self.deudas_prov_pagos_rows):
             messagebox.showwarning("Sin datos", "Primero genera el reporte.")
@@ -1333,146 +1311,6 @@ class ReportesFrame(tk.Frame):
             messagebox.showinfo("Éxito", f"Reporte exportado en:\n{ruta}")
         except Exception as e:
             messagebox.showerror("Error", f"No se pudo exportar a PDF.\n{e}")
-
-    def _abrir_crud_proveedores(self):
-        top = tk.Toplevel(self)
-        top.title("Proveedores")
-        try:
-            top.configure(bg=self.palette["bg"])
-        except Exception:
-            pass
-        top.transient(self.winfo_toplevel())
-        top.grab_set()
-        top.bind("<Escape>", lambda _: top.destroy())
-
-        for c in range(3):
-            top.grid_columnconfigure(c, weight=(1 if c == 1 else 0))
-
-        tk.Label(top, text="Nombre:", bg=self.palette["bg"], fg=self.palette["text"]).grid(row=0, column=0, padx=8, pady=6, sticky="e")
-        ent_nombre = ttk.Entry(top, width=26, style="TEntry"); ent_nombre.grid(row=0, column=1, padx=8, pady=6, sticky="we")
-
-        tk.Label(top, text="Teléfono:", bg=self.palette["bg"], fg=self.palette["text"]).grid(row=1, column=0, padx=8, pady=6, sticky="e")
-        ent_tel = ttk.Entry(top, width=20, style="TEntry"); ent_tel.grid(row=1, column=1, padx=8, pady=6, sticky="we")
-
-        def cargar_lista():
-            tree.delete(*tree.get_children())
-            try:
-                with get_connection() as conn:
-                    rows = conn.execute("SELECT id, nombre, IFNULL(telefono,'') FROM proveedores ORDER BY nombre COLLATE NOCASE").fetchall()
-                for r in rows:
-                    # r puede ser tuple o sqlite Row; cubrir ambos
-                    pid = r[0] if isinstance(r, tuple) else r["id"]
-                    nom = r[1] if isinstance(r, tuple) else r["nombre"]
-                    tel = r[2] if isinstance(r, tuple) else r["telefono"]
-                    tree.insert("", "end", values=(pid, nom, tel))
-                set_treeview_stripes(tree, even_bg=self.palette.get("alt_row"), odd_bg=self.palette.get("panel"))
-            except Exception:
-                pass
-
-        def add_prov(_=None):
-            nombre = (ent_nombre.get() or "").strip()
-            tel = (ent_tel.get() or "").strip()
-            if not nombre:
-                messagebox.showerror("Error", "El nombre es obligatorio.", parent=top)
-                return
-            try:
-                with get_connection() as conn:
-                    conn.execute("INSERT INTO proveedores (nombre, telefono) VALUES (?, ?)", (nombre, tel))
-                ent_nombre.delete(0, tk.END); ent_tel.delete(0, tk.END)
-                cargar_lista(); self._cargar_proveedores()
-                messagebox.showinfo("Éxito", "Proveedor agregado.", parent=top)
-            except Exception as e:
-                messagebox.showerror("Error", f"No se pudo agregar el proveedor.\n{e}", parent=top)
-
-        ttk.Button(top, text="Agregar", command=add_prov, style="Success.TButton").grid(row=2, column=0, columnspan=2, padx=8, pady=(4, 8))
-        top.bind("<Return>", add_prov)
-
-        cols = ("ID", "Nombre", "Teléfono")
-        tree = ttk.Treeview(top, columns=cols, show="headings", style=self._tree_style_name, height=10)
-        for c, w in (("ID", 70), ("Nombre", 220), ("Teléfono", 160)):
-            tree.heading(c, text=c)
-            tree.column(c, width=w, anchor=("center" if c == "ID" else "w"))
-        tree.grid(row=3, column=0, columnspan=3, sticky="nsew", padx=8, pady=(6, 6))
-        top.grid_rowconfigure(3, weight=1)
-
-        def editar():
-            item = tree.focus()
-            if not item:
-                messagebox.showerror("Error", "Selecciona un proveedor.", parent=top)
-                return
-            vals = tree.item(item, "values")
-            pid = int(vals[0]); nombre = vals[1]; tel = vals[2]
-
-            w = tk.Toplevel(top)
-            w.title("Editar proveedor")
-            try:
-                w.configure(bg=self.palette["bg"])
-            except Exception:
-                pass
-            w.transient(top); w.grab_set()
-            w.bind("<Escape>", lambda _: w.destroy())
-
-            tk.Label(w, text="Nombre:", bg=self.palette["bg"], fg=self.palette["text"]).grid(row=0, column=0, padx=8, pady=6, sticky="e")
-            e_nombre = ttk.Entry(w, width=26, style="TEntry"); e_nombre.grid(row=0, column=1, padx=8, pady=6, sticky="we"); e_nombre.insert(0, nombre)
-
-            tk.Label(w, text="Teléfono:", bg=self.palette["bg"], fg=self.palette["text"]).grid(row=1, column=0, padx=8, pady=6, sticky="e")
-            e_tel = ttk.Entry(w, width=20, style="TEntry"); e_tel.grid(row=1, column=1, padx=8, pady=6, sticky="we"); e_tel.insert(0, tel)
-
-            w.grid_columnconfigure(1, weight=1)
-
-            def save(_=None):
-                n = (e_nombre.get() or "").strip()
-                t = (e_tel.get() or "").strip()
-                if not n:
-                    messagebox.showerror("Error", "El nombre es obligatorio.", parent=w)
-                    return
-                try:
-                    with get_connection() as conn:
-                        conn.execute("UPDATE proveedores SET nombre = ?, telefono = ? WHERE id = ?", (n, t, pid))
-                    cargar_lista(); self._cargar_proveedores()
-                    messagebox.showinfo("Éxito", "Proveedor actualizado.", parent=w)
-                    w.destroy()
-                except Exception as e:
-                    messagebox.showerror("Error", f"No se pudo actualizar el proveedor.\n{e}", parent=w)
-
-            ttk.Button(w, text="Guardar", command=save, style="Success.TButton").grid(row=2, column=0, columnspan=2, pady=8)
-            w.bind("<Return>", save)
-
-        def eliminar():
-            item = tree.focus()
-            if not item:
-                messagebox.showerror("Error", "Selecciona un proveedor.", parent=top)
-                return
-            vals = tree.item(item, "values")
-            pid = int(vals[0]); nombre = vals[1]
-            if not messagebox.askyesno("Confirmar", f"¿Eliminar proveedor '{nombre}'?", parent=top):
-                return
-            try:
-                with get_connection() as conn:
-                    # Evitar borrar si tiene registros referenciados en deudas/pagos
-                    refs = 0
-                    try:
-                        refs += conn.execute("SELECT COUNT(*) FROM deudas_proveedores WHERE proveedor_id = ?", (pid,)).fetchone()[0]
-                    except Exception:
-                        pass
-                    try:
-                        refs += conn.execute("SELECT COUNT(*) FROM pagos_proveedores WHERE proveedor_id = ?", (pid,)).fetchone()[0]
-                    except Exception:
-                        pass
-                    if refs > 0:
-                        messagebox.showwarning("No permitido", "No se puede eliminar: tiene movimientos asociados.", parent=top)
-                        return
-                    conn.execute("DELETE FROM proveedores WHERE id = ?", (pid,))
-                cargar_lista(); self._cargar_proveedores()
-                messagebox.showinfo("Éxito", "Proveedor eliminado.", parent=top)
-            except Exception as e:
-                messagebox.showerror("Error", f"No se pudo eliminar el proveedor.\n{e}", parent=top)
-
-        ttk.Button(top, text="Editar", command=editar, style="TButton").grid(row=4, column=0, padx=8, pady=(0, 8), sticky="ew")
-        ttk.Button(top, text="Eliminar", command=eliminar, style="Danger.TButton").grid(row=4, column=1, padx=8, pady=(0, 8), sticky="ew")
-        ttk.Button(top, text="Cerrar", command=top.destroy, style="TButton").grid(row=4, column=2, padx=8, pady=(0, 8), sticky="ew")
-
-        cargar_lista()
 
     # ========= NUEVA Pestaña: Deudas de Clientes ============
     def init_tab_deudas_clientes(self):
@@ -1568,9 +1406,6 @@ class ReportesFrame(tk.Frame):
                 bg=self.palette["bg"],
                 fg=self.palette["warning"]
             ).pack(pady=(0, 8))
-
-
-
 
     def _cargar_clientes(self):
         try:
@@ -1910,11 +1745,6 @@ class ReportesFrame(tk.Frame):
         self._btn(fr, "Generar", "TButton", self.generar_ranking_producto, row=0, column=6, padx=6)
         self._btn_pdf_rank = self._btn(fr, "Exportar PDF", "Success.TButton", self.exportar_pdf_rank, row=0, column=7, padx=4)
         self._btn(fr, "Exportar CSV", "Success.TButton", self.exportar_csv_rank, row=0, column=8, padx=4)
-        if MATPLOTLIB_OK:
-            self._btn(fr, "Gráfica Top 10 (importe)", "TButton", lambda: self._grafica_top_productos(metric="importe")).grid(row=0, column=9, padx=4)
-            self._btn(fr, "Gráfica Top 10 (kilos)", "TButton", lambda: self._grafica_top_productos(metric="kilos")).grid(row=0, column=10, padx=4)
-        else:
-            tk.Label(fr, text="(matplotlib no disponible para gráficas)", bg=self.palette["bg"], fg=self.palette["warning"]).grid(row=0, column=9, columnspan=2, padx=4)
 
         quick = self._panel(self.tab_rank, pady=(0, 6), padx=8, fill="x")
         self._btn(quick, "Hoy", "TButton", lambda: self._set_rango_and(self.rank_ini, self.rank_fin, *self._rango_hoy(), self.generar_ranking_producto)).pack(side="left", padx=4)
@@ -1966,12 +1796,6 @@ class ReportesFrame(tk.Frame):
         self._btn(fg, "Generar", "TButton", self.generar_general, row=0, column=6, padx=6)
         self._btn_pdf_general = self._btn(fg, "Exportar PDF", "Success.TButton", self.exportar_pdf_general, row=0, column=7, padx=4)
         self._btn(fg, "Exportar CSV", "Success.TButton", self.exportar_csv_general, row=0, column=8, padx=4)
-        if MATPLOTLIB_OK:
-            self._btn(fg, "Gráfica Importe", "TButton", lambda: self._grafica_series(metric="importe")).grid(row=0, column=9, padx=4)
-            self._btn(fg, "Gráfica Kilos", "TButton", lambda: self._grafica_series(metric="kilos")).grid(row=0, column=10, padx=4)
-            self._btn(fg, "Gráfica Tickets", "TButton", lambda: self._grafica_series(metric="tickets")).grid(row=0, column=11, padx=4)
-        else:
-            tk.Label(fg, text="(matplotlib no disponible para gráficas)", bg=self.palette["bg"], fg=self.palette["warning"]).grid(row=0, column=9, columnspan=3, padx=4)
 
         quickg = self._panel(self.tab_general, pady=(0, 6), padx=8, fill="x")
         self._btn(quickg, "Hoy", "TButton", lambda: self._set_rango_and(self.gen_ini, self.gen_fin, *self._rango_hoy(), self.generar_general)).pack(side="left", padx=4)
@@ -2195,43 +2019,6 @@ class ReportesFrame(tk.Frame):
         except Exception as e:
             messagebox.showerror("Error", f"No se pudo exportar a PDF.\n{e}")
 
-    def _grafica_top_productos(self, metric: str = "importe"):
-        if not MATPLOTLIB_OK:
-            messagebox.showerror("Gráficas", "matplotlib no está disponible.")
-            return
-        if not self.rank_producto_rows:
-            messagebox.showwarning("Sin datos", "Primero genera el ranking.")
-            return
-
-        try:
-            # Selección de métrica
-            idx = {"importe": 4, "kilos": 2}.get(metric, 4)
-            # Top 10
-            datos = sorted(self.rank_producto_rows, key=lambda r: float(r[idx] or 0), reverse=True)[:10]
-            labels = [d[1] for d in datos]
-            valores = [float(d[idx]) for d in datos]
-
-            fig, ax = plt.subplots(figsize=(9, 5))
-            ax.bar(range(len(valores)), valores)
-            ax.set_title(f"Top 10 por {metric}")
-            ax.set_ylabel(metric.capitalize())
-            ax.set_xlabel("Producto")
-            # Corrección: set_xticks antes de set_xticklabels
-            ax.set_xticks(range(len(labels)))
-            ax.set_xticklabels(labels, rotation=45, ha="right")
-            fig.tight_layout()
-
-            nombre = f"grafica_top10_{metric}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-            ruta = self._ruta_export(nombre)
-            if not ruta:
-                plt.close(fig)
-                return
-            fig.savefig(ruta, dpi=120)
-            plt.close(fig)
-            messagebox.showinfo("Éxito", f"Gráfica guardada en:\n{ruta}")
-        except Exception as e:
-            messagebox.showerror("Error", f"No se pudo generar la gráfica.\n{e}")
-
     # --------- Lógica general (serie por día) ----------
     def generar_general(self):
         self.tree_general.delete(*self.tree_general.get_children())
@@ -2410,47 +2197,6 @@ class ReportesFrame(tk.Frame):
             messagebox.showinfo("Éxito", f"Reporte exportado en:\n{ruta}")
         except Exception as e:
             messagebox.showerror("Error", f"No se pudo exportar a PDF.\n{e}")
-
-    def _grafica_series(self, metric: str = "importe"):
-        if not MATPLOTLIB_OK:
-            messagebox.showerror("Gráficas", "matplotlib no está disponible.")
-            return
-        if not self.general_series_rows:
-            messagebox.showwarning("Sin datos", "Primero genera la serie general.")
-            return
-
-        try:
-            fechas = [r[0] for r in self.general_series_rows]
-            if metric == "importe":
-                valores = [float(r[1]) for r in self.general_series_rows]
-                ylabel = "Importe"
-            elif metric == "kilos":
-                valores = [float(r[2]) for r in self.general_series_rows]
-                ylabel = "Kilos"
-            else:
-                valores = [int(r[3]) for r in self.general_series_rows]
-                ylabel = "Tickets"
-
-            fig, ax = plt.subplots(figsize=(10, 5))
-            ax.plot(range(len(valores)), valores, marker="o")
-            ax.set_title(f"Serie general - {ylabel}")
-            ax.set_ylabel(ylabel)
-            ax.set_xlabel("Fecha")
-            # set_xticks antes de set_xticklabels
-            ax.set_xticks(range(len(fechas)))
-            ax.set_xticklabels(fechas, rotation=45, ha="right")
-            fig.tight_layout()
-
-            nombre = f"grafica_serie_{metric}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-            ruta = self._ruta_export(nombre)
-            if not ruta:
-                plt.close(fig)
-                return
-            fig.savefig(ruta, dpi=120)
-            plt.close(fig)
-            messagebox.showinfo("Éxito", f"Gráfica guardada en:\n{ruta}")
-        except Exception as e:
-            messagebox.showerror("Error", f"No se pudo generar la gráfica.\n{e}")
 
     # ================= Calendario (forzar popup) ===================
     def abrir_calendario(self, entry_target: ttk.Entry, fuentes=("all",)):

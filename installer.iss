@@ -5,7 +5,7 @@
 ; En Windows 7 SP1 se puede aplicar KB2999226 (UCRT) si está incluido.
 ; -----------------------------------------------------------
 
-#define MyAppName     "Sistema de Gestión"
+#define MyAppName     "Ajos la Mision"
 #define MyAppVersion  "1.0.0"
 #define MyAppPublisher "Synapse IT"
 #define MyAppExeName  "SistemaGestion.exe"

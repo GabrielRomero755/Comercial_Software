@@ -1,4 +1,4 @@
-# modules/__init__.py
+# ui/__init__.py
 # -----------------------------------------------------------
 # Paquete que contiene los módulos funcionales del sistema.
 # - Exporta: home, productos, inventario, ventas, creditos, mermas, gastos, reportes

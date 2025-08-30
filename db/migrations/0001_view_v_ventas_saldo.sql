@@ -1,21 +1,38 @@
 -- 0001_view_v_ventas_saldo.sql
-CREATE VIEW IF NOT EXISTS v_ventas_saldo AS
+-- Crea/recrea una vista con el saldo de clientes = ventas a crédito activas - pagos.
+-- Idempotente y SIN BEGIN/COMMIT (el runner se encarga de la transacción).
+
+PRAGMA foreign_keys = ON;
+
+DROP VIEW IF EXISTS v_ventas_saldo;
+
+CREATE VIEW v_ventas_saldo AS
+WITH ventas_credito AS (
+  SELECT
+    c.id AS cliente_id,
+    COALESCE(SUM(v.total), 0) AS total_credito
+  FROM clientes c
+  LEFT JOIN ventas v
+    ON v.cliente_id = c.id
+   AND v.tipo_venta = 'credito'
+   AND (v.estado IS NULL OR v.estado <> 'CANCELADA')
+  GROUP BY c.id
+),
+pagos AS (
+  SELECT
+    c.id AS cliente_id,
+    COALESCE(SUM(p.monto), 0) AS total_pagado
+  FROM clientes c
+  LEFT JOIN pagos_credito p
+    ON p.cliente_id = c.id
+  GROUP BY c.id
+)
 SELECT
-  v.id              AS venta_id,
-  v.fecha,
-  v.cliente_id,
-  v.producto_id,
-  v.tipo_venta,
-  IFNULL(v.total, v.kilos * v.precio) AS total_venta,
-  (SELECT IFNULL(SUM(monto),0) FROM pagos_cliente pc WHERE pc.venta_id = v.id) AS total_pagado,
-  ROUND( (IFNULL(v.total, v.kilos * v.precio)) - 
-         (SELECT IFNULL(SUM(monto),0) FROM pagos_cliente pc WHERE pc.venta_id = v.id), 2) AS saldo,
-  CASE
-    WHEN UPPER(IFNULL(v.estado,'')) = 'CANCELADA' THEN 'CANCELADA'
-    WHEN ROUND( (IFNULL(v.total, v.kilos * v.precio)) - 
-                (SELECT IFNULL(SUM(monto),0) FROM pagos_cliente pc WHERE pc.venta_id = v.id), 2) <= 0
-         THEN 'PAGADA'
-    ELSE 'PENDIENTE'
-  END AS estatus
-FROM ventas v
-WHERE LOWER(IFNULL(v.tipo_venta,'')) = 'credito';
+  c.id                           AS cliente_id,
+  c.nombre                       AS cliente_nombre,
+  COALESCE(vc.total_credito, 0)  AS total_credito,
+  COALESCE(pg.total_pagado, 0)   AS total_pagado,
+  (COALESCE(vc.total_credito, 0) - COALESCE(pg.total_pagado, 0)) AS saldo
+FROM clientes c
+LEFT JOIN ventas_credito vc ON vc.cliente_id = c.id
+LEFT JOIN pagos pg          ON pg.cliente_id = c.id;

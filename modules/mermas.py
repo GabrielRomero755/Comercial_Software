@@ -172,7 +172,8 @@ class MermasFrame(tk.Frame):
         tabla_panel.grid_columnconfigure(0, weight=1)
         tabla_panel.grid_rowconfigure(0, weight=1)
 
-        columnas = ("Producto", "Kilos", "Cajas", "Unidades", "Motivo", "Fecha")
+        # ⬇️ ANTES: ("Producto", "Kilos", "Cajas", "Unidades", "Motivo", "Fecha")
+        columnas = ("ID", "Producto", "Kilos", "Cajas", "Unidades", "Motivo", "Fecha")
 
         # Scrollbars
         scroll_y = ttk.Scrollbar(tabla_panel, orient="vertical", style="Vertical.TScrollbar")
@@ -186,6 +187,7 @@ class MermasFrame(tk.Frame):
         scroll_x.config(command=self.tree.xview)
 
         for col, width, anchor in (
+            ("ID", 0, "center"),               # ⬅️ Oculta ID
             ("Producto", 200, "w"),
             ("Kilos", 100, "e"),
             ("Cajas", 100, "e"),
@@ -200,11 +202,12 @@ class MermasFrame(tk.Frame):
         scroll_y.grid(row=0, column=1, sticky="ns")
         scroll_x.grid(row=1, column=0, sticky="ew")
 
-        # Ordenamiento por encabezados
+        # Ordenamiento por encabezados (agregamos ID:int)
         self._setup_sorting(
             tree=self.tree,
             columnas=columnas,
             tipos={
+                "ID": "int",
                 "Producto": "str",
                 "Kilos": "float",
                 "Cajas": "float",
@@ -213,6 +216,15 @@ class MermasFrame(tk.Frame):
                 "Fecha": "date",
             },
         )
+
+        # ⬇️ Doble click = editar
+        self.tree.bind("<Double-1>", lambda _e: self.modificar_merma())
+
+        # ⬇️ Barra de acciones simple
+        actions = tk.Frame(tabla_panel, bg=PALETTE["panel"])
+        actions.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        ttk.Button(actions, text="Modificar merma", command=self.modificar_merma).pack(side="left", padx=(0, 8))
+
 
     # ---------------------------
     # Datos / DB
@@ -266,24 +278,27 @@ class MermasFrame(tk.Frame):
             with get_connection() as conn:
                 rows = conn.execute(
                     """
-                    SELECT p.nombre AS producto, m.kilos, m.num_cajas, m.unidades, m.motivo, m.fecha
-                      FROM mermas m
-                      JOIN productos p ON p.id = m.producto_id
-                  ORDER BY m.fecha DESC
+                    SELECT m.id, p.nombre AS producto, m.kilos, m.num_cajas, m.unidades, m.motivo, m.fecha
+                    FROM mermas m
+                    JOIN productos p ON p.id = m.producto_id
+                ORDER BY m.fecha DESC
                     """
                 ).fetchall()
+
             for r in rows:
                 self.tree.insert(
                     "", "end",
                     values=(
-                        r[0],  # Producto
-                        f"{redondear_dos_decimales(r[1] or 0):.2f}",
-                        f"{redondear_dos_decimales(r[2] or 0):.2f}",
-                        int(r[3] or 0),
-                        r[4] or "",
-                        formatear_fecha(str(r[5])),
+                        int(r[0]),                                   # ⬅️ ID
+                        r[1],                                        # Producto
+                        f"{redondear_dos_decimales(r[2] or 0):.2f}", # Kilos
+                        f"{redondear_dos_decimales(r[3] or 0):.2f}", # Cajas
+                        int(r[4] or 0),                              # Unidades
+                        r[5] or "",                                  # Motivo
+                        formatear_fecha(str(r[6])),                  # Fecha
                     ),
                 )
+
             set_treeview_stripes(self.tree, even_bg=PALETTE.get("alt_row"), odd_bg=PALETTE.get("panel"))
         except Exception as e:
             messagebox.showerror("Error", f"No se pudieron cargar las mermas.\n{e}")
@@ -403,6 +418,172 @@ class MermasFrame(tk.Frame):
         except Exception as e:
             messagebox.showerror("Error", f"No se pudo registrar la merma.\n{e}")
 
+    def _selected_merma_id(self) -> int | None:
+        item = self.tree.focus()
+        if not item:
+            return None
+        vals = self.tree.item(item, "values")
+        if not vals or len(vals) < 1:
+            return None
+        try:
+            return int(vals[0])  # ID está en la primera columna
+        except Exception:
+            return None
+
+    
+    def modificar_merma(self):
+        merma_id = self._selected_merma_id()
+        if not merma_id:
+            messagebox.showwarning("Editar", "Selecciona una merma en la tabla.")
+            return
+
+        # Leer registro actual
+        try:
+            with get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT m.producto_id, p.nombre, m.kilos, m.num_cajas, m.unidades,
+                        IFNULL(m.motivo,''), m.fecha
+                    FROM mermas m
+                    JOIN productos p ON p.id = m.producto_id
+                    WHERE m.id = ?
+                """, (int(merma_id),))
+                row = cur.fetchone()
+            if not row:
+                raise ValueError("Merma no encontrada.")
+            (prod_id_old, prod_nom_old, k_old, c_old, u_old,
+            motivo_old, fecha_old) = row
+            k_old = float(k_old or 0)
+            c_old = float(c_old or 0)
+            u_old = int(u_old or 0)
+        except Exception as e:
+            messagebox.showerror("Editar", f"No se pudo leer la merma.\n{e}")
+            return
+
+        # --- Diálogo de edición ---
+        win = tk.Toplevel(self)
+        win.title(f"Editar merma #{merma_id}")
+        try: win.configure(bg=PALETTE["bg"])
+        except Exception: pass
+        win.transient(self.winfo_toplevel())
+
+        # Producto
+        tk.Label(win, text="Producto:", bg=PALETTE["bg"], fg=PALETTE["text"]).grid(row=0, column=0, padx=10, pady=6, sticky="e")
+        cb_prod = self._combobox(win, width=30, row=0, column=1, padx=10, pady=6, sticky="we")
+        cb_prod["values"] = list(self.productos.keys())
+        cb_prod.set(prod_nom_old)
+        win.grid_columnconfigure(1, weight=1)
+
+        # Kilos / Cajas / Unidades
+        tk.Label(win, text="Kilos (-):", bg=PALETTE["bg"], fg=PALETTE["text"]).grid(row=1, column=0, padx=10, pady=6, sticky="e")
+        e_kilos = ttk.Entry(win, width=14); e_kilos.grid(row=1, column=1, padx=10, pady=6, sticky="w")
+        e_kilos.insert(0, f"{k_old:.2f}")
+        adjuntar_validador_2_decimales(e_kilos, permitir_vacio=True)
+
+        tk.Label(win, text="Cajas (-):", bg=PALETTE["bg"], fg=PALETTE["text"]).grid(row=2, column=0, padx=10, pady=6, sticky="e")
+        e_cajas = ttk.Entry(win, width=14); e_cajas.grid(row=2, column=1, padx=10, pady=6, sticky="w")
+        e_cajas.insert(0, f"{c_old:.2f}")
+        adjuntar_validador_2_decimales(e_cajas, permitir_vacio=True)
+
+        tk.Label(win, text="Unidades (-):", bg=PALETTE["bg"], fg=PALETTE["text"]).grid(row=3, column=0, padx=10, pady=6, sticky="e")
+        e_unid = ttk.Entry(win, width=14); e_unid.grid(row=3, column=1, padx=10, pady=6, sticky="w")
+        e_unid.insert(0, str(u_old))
+
+        # Motivo
+        tk.Label(win, text="Motivo:", bg=PALETTE["bg"], fg=PALETTE["text"]).grid(row=4, column=0, padx=10, pady=6, sticky="e")
+        e_motivo = ttk.Entry(win, width=48); e_motivo.grid(row=4, column=1, padx=10, pady=6, sticky="we")
+        e_motivo.insert(0, motivo_old or "")
+
+        # Fecha
+        tk.Label(win, text="Fecha (YYYY-MM-DD HH:MM:SS):", bg=PALETTE["bg"], fg=PALETTE["text"]).grid(row=5, column=0, padx=10, pady=6, sticky="e")
+        e_fecha = ttk.Entry(win, width=22); e_fecha.grid(row=5, column=1, padx=10, pady=6, sticky="w")
+        e_fecha.insert(0, fecha_old or datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+
+        def guardar():
+            nuevo_prod_nom = (cb_prod.get() or "").strip()
+            nuevo_prod_id = self.productos.get(nuevo_prod_nom)
+            if not nuevo_prod_id:
+                messagebox.showerror("Editar", "Selecciona un producto válido.", parent=win); return
+
+            # Leer y validar números
+            try:
+                k_new = to_float(e_kilos.get() or 0, permitir_cero=True)
+                c_new = to_float(e_cajas.get() or 0, permitir_cero=True)
+                u_new = to_int(e_unid.get()  or 0, permitir_cero=True)
+            except Exception:
+                messagebox.showerror("Editar", "Valores inválidos para kilos/cajas/unidades.", parent=win); return
+            if any(x < 0 for x in (k_new, c_new, u_new)):
+                messagebox.showerror("Editar", "No se permiten valores negativos.", parent=win); return
+            if (k_new <= 0) and (c_new <= 0) and (u_new <= 0):
+                messagebox.showerror("Editar", "Ingresa al menos un valor mayor a 0.", parent=win); return
+
+            nuevo_motivo = (e_motivo.get() or "").strip()
+            nueva_fecha  = (e_fecha.get()  or datetime.now().strftime("%Y-%m-%d %H:%M:%S")).strip()
+
+            # Verificar stock suficiente "reponiendo" primero la merma anterior en memoria
+            try:
+                with get_connection() as conn:
+                    cur = conn.cursor()
+                    cur.execute("SELECT kilos, num_cajas, unidades FROM productos WHERE id = ?", (int(nuevo_prod_id),))
+                    srow = cur.fetchone()
+                    if not srow:
+                        raise ValueError("Producto no encontrado.")
+
+                    sk, sc, su = (float(srow[0] or 0), float(srow[1] or 0), int(srow[2] or 0))
+
+                    # Si es el mismo producto, al reponer la merma anterior aumenta el stock disponible
+                    sk_repuesto = sk + (k_old if nuevo_prod_id == prod_id_old else 0.0)
+                    sc_repuesto = sc + (c_old if nuevo_prod_id == prod_id_old else 0.0)
+                    su_repuesto = su + (u_old if nuevo_prod_id == prod_id_old else 0)
+
+                    if (k_new > sk_repuesto) or (c_new > sc_repuesto) or (u_new > su_repuesto):
+                        messagebox.showerror(
+                            "Stock insuficiente",
+                            "La merma nueva excede el stock disponible tras reponer la merma anterior.",
+                            parent=win
+                        )
+                        return
+
+                    # Transacción de actualización: reponer viejo -> aplicar nuevo -> actualizar merma
+                    cur.execute("""
+                        UPDATE productos
+                        SET kilos = kilos + ?, num_cajas = num_cajas + ?, unidades = unidades + ?
+                        WHERE id = ?
+                    """, (float(k_old), float(c_old), int(u_old), int(prod_id_old)))
+
+                    cur.execute("""
+                        UPDATE productos
+                        SET kilos = kilos - ?, num_cajas = num_cajas - ?, unidades = unidades - ?
+                        WHERE id = ?
+                    """, (float(k_new), float(c_new), int(u_new), int(nuevo_prod_id)))
+
+                    cur.execute("""
+                        UPDATE mermas
+                        SET producto_id = ?, kilos = ?, num_cajas = ?, unidades = ?,
+                            motivo = ?, fecha = ?
+                        WHERE id = ?
+                    """, (int(nuevo_prod_id), float(k_new), float(c_new), int(u_new),
+                        nuevo_motivo, nueva_fecha, int(merma_id)))
+
+                messagebox.showinfo("Éxito", "Merma actualizada.", parent=win)
+                win.destroy()
+                self.cargar_mermas()
+                self._on_producto_change()  # refresca ficha del producto actual del formulario
+
+            except Exception as e:
+                messagebox.showerror("Error", f"No se pudo guardar la merma.\n{e}", parent=win)
+
+        ttk.Button(win, text="Guardar cambios", command=guardar, style="Success.TButton")\
+            .grid(row=6, column=0, columnspan=2, padx=10, pady=(8, 10), sticky="ew")
+
+        # atajos y modal
+        win.bind("<Return>", lambda _e: guardar())
+        win.bind("<Escape>", lambda _e: win.destroy())
+        try: win.grab_set()
+        except Exception: pass
+        try: win.focus_force()
+        except Exception: pass
+
     # ---------------------------
     # Utilidades
     # ---------------------------
@@ -480,279 +661,6 @@ def mostrar(frame_contenido):
             pass
     frame = MermasFrame(frame_contenido)
     # Montaje flexible (grid/pack)
-    try:
-        frame.grid(row=0, column=0, sticky="nsew")
-    except Exception:
-        frame.pack(fill="both", expand=True)
-
-    # ---------------------------
-    # Datos / selección
-    # ---------------------------
-    def cargar_productos(self):
-        """Carga productos (id, nombre) para el combobox."""
-        try:
-            with get_connection() as conn:
-                cur = conn.cursor()
-                cur.execute("SELECT id, nombre FROM productos ORDER BY nombre COLLATE NOCASE")
-                productos = cur.fetchall()
-        except Exception as e:
-            messagebox.showerror("Error", f"No se pudieron cargar los productos.\n{e}")
-            return
-
-        self.productos = {p[1]: int(p[0]) for p in productos}  # nombre -> id
-        nombres = [p[1] for p in productos]
-        self.producto_combo["values"] = nombres
-        if nombres:
-            self.producto_combo.current(0)
-            self._actualizar_info_producto(self.producto_combo.get())
-
-    def _on_producto_change(self, event=None):
-        self._actualizar_info_producto(self.producto_combo.get())
-
-    def _actualizar_info_producto(self, nombre: str):
-        if not nombre:
-            return
-        try:
-            with get_connection() as conn:
-                cur = conn.cursor()
-                cur.execute(
-                    "SELECT kilos, num_cajas, unidades, peso_caja FROM productos WHERE nombre = ?",
-                    (nombre,)
-                )
-                row = cur.fetchone()
-            if not row:
-                return
-            kilos, cajas, unidades, peso = (
-                float(row[0] or 0), float(row[1] or 0), int(row[2] or 0), float(row[3] or 0)
-            )
-            self.info_label.config(
-                text=f"Kilos: {redondear_dos_decimales(kilos):.2f} | "
-                     f"Cajas: {redondear_dos_decimales(cajas):.2f} | "
-                     f"Unidades: {unidades} | "
-                     f"Peso/caja: {redondear_dos_decimales(peso):.2f} kg"
-            )
-        except Exception:
-            pass
-
-    # ---------------------------
-    # Registro de merma
-    # ---------------------------
-    def registrar_merma(self):
-        """Inserta una merma (kilos/cajas/unidades) y descuenta stock."""
-        nombre_producto = self.producto_combo.get().strip()
-        if not nombre_producto:
-            messagebox.showerror("Error", "Selecciona un producto.")
-            return
-
-        # Convertir entradas
-        try:
-            kilos_txt = (self.kilos_entry.get() or "").strip()
-            cajas_txt = (self.cajas_entry.get() or "").strip()
-            unidades_txt = (self.unidades_entry.get() or "").strip()
-
-            kilos     = to_float(kilos_txt or 0, permitir_cero=True)
-            num_cajas = to_float(cajas_txt or 0, permitir_cero=True)
-            unidades  = to_int(unidades_txt or 0, permitir_cero=True)
-        except ValueError:
-            messagebox.showerror("Error", "Valores inválidos. Revisa kilos/cajas/unidades (máx. 2 decimales donde aplica).")
-            return
-
-        if kilos < 0 or num_cajas < 0 or unidades < 0:
-            messagebox.showerror("Error", "Los valores no pueden ser negativos.")
-            return
-
-        motivo = (self.motivo_entry.get().strip() or "Merma sin motivo")
-
-        producto_id = self.productos.get(nombre_producto)
-        if not producto_id:
-            messagebox.showerror("Error", "Producto no válido.")
-            return
-
-        # Leer stock y peso_caja
-        try:
-            with get_connection() as conn:
-                cur = conn.cursor()
-                cur.execute("SELECT kilos, num_cajas, unidades, peso_caja FROM productos WHERE id = ?", (producto_id,))
-                row = cur.fetchone()
-            if not row:
-                messagebox.showerror("Error", "Producto no encontrado en la base de datos.")
-                return
-
-            stock_kilos    = float(row[0] or 0.0)
-            stock_cajas    = float(row[1] or 0.0)
-            stock_unidades = int(row[2] or 0)
-            peso_caja      = float(row[3] or 0.0)
-        except Exception as e:
-            messagebox.showerror("Error", f"No se pudo leer el stock del producto.\n{e}")
-            return
-
-        # Autocálculo kilos<->cajas si falta uno y hay peso_caja
-        if peso_caja > 0:
-            if kilos <= 0 and num_cajas > 0:
-                kilos = redondear_dos_decimales(num_cajas * peso_caja)
-                self.kilos_entry.delete(0, tk.END)
-                self.kilos_entry.insert(0, f"{kilos:.2f}")
-            elif num_cajas <= 0 and kilos > 0:
-                num_cajas = redondear_dos_decimales(kilos / peso_caja)
-                self.cajas_entry.delete(0, tk.END)
-                self.cajas_entry.insert(0, f"{num_cajas:.2f}")
-
-        if (kilos <= 0) and (num_cajas <= 0) and (unidades <= 0):
-            messagebox.showerror("Error", "Ingresa al menos un valor mayor a 0 (kilos, cajas o unidades).")
-            return
-
-        # Validar stock suficiente
-        if kilos > stock_kilos:
-            messagebox.showerror("Stock insuficiente", f"Kilos disponibles: {redondear_dos_decimales(stock_kilos)}")
-            return
-        if num_cajas > stock_cajas:
-            messagebox.showerror("Stock insuficiente", f"Cajas disponibles: {redondear_dos_decimales(stock_cajas)}")
-            return
-        if unidades > stock_unidades:
-            messagebox.showerror("Stock insuficiente", f"Unidades disponibles: {stock_unidades}")
-            return
-
-        # Ejecutar operación
-        try:
-            fecha_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            with get_connection() as conn:
-                cur = conn.cursor()
-
-                # Insertar merma
-                cur.execute("""
-                    INSERT INTO mermas (producto_id, kilos, num_cajas, unidades, motivo, fecha)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                """, (producto_id, float(kilos), float(num_cajas), int(unidades), motivo, fecha_str))
-
-                # Actualizar stock
-                cur.execute("""
-                    UPDATE productos
-                    SET kilos = kilos - ?, num_cajas = num_cajas - ?, unidades = unidades - ?
-                    WHERE id = ?
-                """, (float(kilos), float(num_cajas), int(unidades), producto_id))
-
-            messagebox.showinfo(
-                "Éxito",
-                "Merma registrada correctamente."
-            )
-
-            # Limpiar campos
-            for e in (self.kilos_entry, self.cajas_entry, self.unidades_entry, self.motivo_entry):
-                e.delete(0, tk.END)
-
-            # Refrescar tabla e info
-            self.cargar_mermas()
-            self._actualizar_info_producto(nombre_producto)
-
-        except Exception as e:
-            messagebox.showerror("Error", f"No se pudo registrar la merma.\n{e}")
-
-    # ---------------------------
-    # Listado
-    # ---------------------------
-    def cargar_mermas(self):
-        """Carga la tabla de mermas más recientes primero."""
-        self.tree.delete(*self.tree.get_children())
-        try:
-            with get_connection() as conn:
-                cur = conn.cursor()
-                cur.execute("""
-                    SELECT p.nombre, m.kilos, m.num_cajas, m.unidades, m.motivo, m.fecha
-                    FROM mermas m
-                    JOIN productos p ON m.producto_id = p.id
-                    ORDER BY m.fecha DESC
-                """)
-                for nombre, kilos, cajas, unidades, motivo, fecha in cur.fetchall():
-                    self.tree.insert("", "end", values=(
-                        nombre,
-                        f"{redondear_dos_decimales(kilos):.2f}",
-                        f"{redondear_dos_decimales(cajas):.2f}",
-                        int(unidades or 0),
-                        motivo or "",
-                        formatear_fecha(fecha)
-                    ))
-        except Exception as e:
-            messagebox.showerror("Error", f"No se pudieron cargar las mermas.\n{e}")
-
-    # ---------------------------
-    # Ordenamiento por columnas
-    # ---------------------------
-    def _setup_sorting(self, tree: ttk.Treeview, columnas, tipos):
-        """
-        Añade ordenamiento por encabezados.
-        tipos: dict nombre_col -> 'int'|'float'|'money'|'date'|'str'
-        """
-        tree._sort_state = {}  # col -> bool(reverse)
-        col_index = {c: i for i, c in enumerate(columnas)}
-
-        def parse_value(col, val):
-            t = tipos.get(col, "str")
-            s = str(val).strip()
-
-            if t == "int":
-                # Tolerante con "5", "5.0" y separadores
-                try:
-                    return int(float(s.replace(",", "")))
-                except Exception:
-                    return 0
-            if t == "float":
-                try:
-                    return float(s.replace(",", ""))
-                except Exception:
-                    return 0.0
-            if t == "money":
-                try:
-                    return float(s.replace("$", "").replace(",", ""))
-                except Exception:
-                    return 0.0
-            if t == "date":
-                from datetime import datetime as _dt
-                # Intentar múltiples formatos comunes en el sistema
-                for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%d/%m/%Y"):
-                    try:
-                        return _dt.strptime(s, fmt)
-                    except Exception:
-                        pass
-                return s
-            # 'str'
-            return s.lower()
-
-        def sort_by(col):
-            reverse = not tree._sort_state.get(col, False)
-            data = []
-            idx = col_index[col]
-            for iid in tree.get_children(""):
-                vals = tree.item(iid, "values")
-                v = vals[idx] if idx < len(vals) else ""
-                data.append((parse_value(col, v), iid))
-            data.sort(key=lambda x: x[0], reverse=reverse)
-            for n, (_, iid) in enumerate(data):
-                tree.move(iid, "", n)
-            tree._sort_state[col] = reverse
-
-        # Asignar comando a cada encabezado
-        for c in columnas:
-            tree.heading(c, text=c, command=lambda cc=c: sort_by(cc))
-
-    # ---------------------------
-    # Utilidades UX
-    # ---------------------------
-    def _limpiar_formulario(self, event=None):
-        """Limpia campos de captura y regresa el foco al Producto."""
-        for e in (self.kilos_entry, self.cajas_entry, self.unidades_entry, self.motivo_entry):
-            e.delete(0, tk.END)
-        try:
-            self.producto_combo.focus_set()
-        except Exception:
-            pass
-
-
-def mostrar(frame_contenido):
-    """Punto de entrada usado por main.py para montar la vista."""
-    for widget in frame_contenido.winfo_children():
-        widget.destroy()
-    frame = MermasFrame(frame_contenido)
-    # Compatibilidad con grid o pack según cómo esté armado main
     try:
         frame.grid(row=0, column=0, sticky="nsew")
     except Exception:

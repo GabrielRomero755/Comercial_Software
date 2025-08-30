@@ -72,10 +72,15 @@ class InventarioFrame(tk.Frame):
         # Flags de esquema (columnas / tablas opcionales)
         self._inv_has_gasto_fk = False            # inventario.gasto_id
         self._inv_has_deuda_fk = False            # inventario.deuda_proveedor_id
+        self._inv_has_gasto_fk = self._verificar_columna("inventario", "gasto_id")
         self._pagos_has_proveedor_id = False      # pagos_proveedores.proveedor_id
         self._pagos_has_deuda_fk = False          # pagos_proveedores.deuda_proveedor_id
         self._has_deudas_prov = False             # tabla deudas_proveedores
         self._prov_has_direccion = False  # proveedores.direccion
+        
+        # Campo oculto para ID de movimiento (para edición)
+        self.entry_id_movimiento = ttk.Entry(self)
+        self.entry_id_movimiento.pack_forget()
 
 
         # Estilo TTK unificado
@@ -84,6 +89,14 @@ class InventarioFrame(tk.Frame):
 
         self._build_ui()
         self._after_mount()
+    def _verificar_columna(self, tabla, columna):
+        try:
+            with get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute(f"PRAGMA table_info({tabla})")
+                return columna.lower() in {str(r[1]).lower() for r in cur.fetchall()}
+        except Exception:
+            return False
 
     # ---------------------------
     # Helpers UI (ttk preferente)
@@ -322,22 +335,32 @@ class InventarioFrame(tk.Frame):
 
         # === Tabla de movimientos ===
         tabla_panel = self._panel(root, pady=8, padx=8, fill="both", expand=True)
-        columnas = ("Movimiento", "Producto", "Kilos", "Cajas", "Unidades", "Monto", "Tipo", "Motivo", "Fecha")
+
+        # Agregamos ID y Origen (ocultos) para poder identificar el registro
+        columnas = ("ID", "Origen", "Movimiento", "Producto", "Kilos", "Cajas", "Unidades", "Monto", "Tipo", "Motivo", "Fecha")
         self.tree, _, _ = self._tree_with_scrolls(tabla_panel, columnas, height=12)
-        for col, width, anchor in (
-            ("Movimiento", 100, "center"),
-            ("Producto",   200, "w"),
-            ("Kilos",       90, "e"),
-            ("Cajas",       90, "e"),
-            ("Unidades",    90, "e"),
-            ("Monto",      110, "e"),
-            ("Tipo",       140, "center"),
-            ("Motivo",     320, "w"),
-            ("Fecha",      150, "center"),
-        ):
+
+        # Encabezados y tamaños (ID/Origen ocultos)
+        cfg = (
+            ("ID",          0,   "center", False),
+            ("Origen",      0,   "center", False),
+            ("Movimiento", 100,  "center", True),
+            ("Producto",   200,  "w",      True),
+            ("Kilos",       90,  "e",      True),
+            ("Cajas",       90,  "e",      True),
+            ("Unidades",    90,  "e",      True),
+            ("Monto",      110,  "e",      True),
+            ("Tipo",       140,  "center", True),
+            ("Motivo",     320,  "w",      True),
+            ("Fecha",      150,  "center", True),
+        )
+        for col, width, anchor, stretch in cfg:
             self.tree.heading(col, text=col)
-            self.tree.column(col, width=width, anchor=anchor, stretch=(col in ("Producto", "Motivo")))
+            self.tree.column(col, width=width, anchor=anchor, stretch=stretch)
+
         self._setup_sorting(self.tree, columnas, {
+            "ID":         "int",
+            "Origen":     "str",
             "Movimiento": "str",
             "Producto":   "str",
             "Kilos":      "float",
@@ -348,7 +371,18 @@ class InventarioFrame(tk.Frame):
             "Motivo":     "str",
             "Fecha":      "date",
         })
-        
+
+        # Botonera de acciones
+        acciones = tk.Frame(tabla_panel, bg=PALETTE["panel"])
+        acciones.pack(fill="x", padx=8, pady=(6, 0))
+        ttk.Button(acciones, text="Modificar movimiento", command=self.modificar_movimiento)\
+            .pack(side="left", padx=(0, 8))
+        ttk.Button(acciones, text="Eliminar movimiento", command=self.eliminar_movimiento, style="Danger.TButton")\
+            .pack(side="left")
+
+        # Doble click = editar
+        self.tree.bind("<Double-1>", lambda _e: self.modificar_movimiento())
+
         # === DEUDAS ACTIVAS (siempre visibles) ===
         da_panel = self._panel(root, pady=8, padx=8, fill="both", expand=False)
         self._title(da_panel, "Deudas activas")
@@ -1005,9 +1039,6 @@ class InventarioFrame(tk.Frame):
 
         self._cargar_cxp_creditos()
 
-
-
-
     # ---------------------------
     # Esquema / detección
     # ---------------------------
@@ -1099,8 +1130,7 @@ class InventarioFrame(tk.Frame):
         except Exception:
             # Si algo falla, dejamos flags como estaban; el insert fallará y lo capturará el except del caller.
             pass
-        
-        
+           
     # ---------------------------
     # Carga de catálogos
     # ---------------------------
@@ -1212,7 +1242,6 @@ class InventarioFrame(tk.Frame):
                 self.cxp_prov_filtro.current(0)
         except Exception:
             pass
-
         
     def _actualizar_deuda_proveedor_pago(self):
         """Llena la tabla de deudas abiertas según el proveedor seleccionado en el combo de pagos."""
@@ -1256,8 +1285,6 @@ class InventarioFrame(tk.Frame):
                 formato_moneda(float(saldo or 0)),
                 desc or ""
             ))
-
-
 
     # ---------------------------
     # Cambios de selección
@@ -1615,26 +1642,31 @@ class InventarioFrame(tk.Frame):
         self.cargar_movimientos()
 
     def cargar_movimientos(self, filtro: str = ""):
+        """Rellena la tabla con Entradas (inventario) y Mermas,
+        incluyendo columnas ocultas: ID y Origen ('inventario' | 'mermas')."""
         self.tree.delete(*self.tree.get_children())
         try:
             with get_connection() as conn:
                 cur = conn.cursor()
 
                 if self._inv_has_gasto_fk:
+                    # Con FK a gastos: sencillo
                     if filtro:
                         like = f"%{filtro}%"
                         cur.execute("""
-                            SELECT 'Entrada' AS mov, p.nombre, i.kilos, i.num_cajas, i.unidades,
+                            SELECT i.id AS id, 'inventario' AS origen,
+                                   'Entrada' AS mov, p.nombre, i.kilos, i.num_cajas, i.unidades,
                                    g.monto, i.tipo, i.motivo, i.fecha
                             FROM inventario i
                             JOIN productos p ON p.id = i.producto_id
-                            LEFT JOIN gastos g ON g.id = i.gasto_id
+                            LEFT JOIN gastos   g ON g.id = i.gasto_id
                             WHERE p.nombre LIKE ? OR i.motivo LIKE ? OR IFNULL(i.tipo,'') LIKE ?
                         """, (like, like, like))
                         entradas = cur.fetchall()
                         cur.execute("""
-                            SELECT 'Merma' AS mov, p.nombre, m.kilos, m.num_cajas, m.unidades,
-                                   NULL, '' AS tipo, m.motivo, m.fecha
+                            SELECT m.id AS id, 'mermas' AS origen,
+                                   'Merma'  AS mov, p.nombre, m.kilos, m.num_cajas, m.unidades,
+                                   NULL AS monto, '' AS tipo, m.motivo, m.fecha
                             FROM mermas m
                             JOIN productos p ON p.id = m.producto_id
                             WHERE p.nombre LIKE ? OR m.motivo LIKE ?
@@ -1642,37 +1674,41 @@ class InventarioFrame(tk.Frame):
                         mermas = cur.fetchall()
                     else:
                         cur.execute("""
-                            SELECT 'Entrada' AS mov, p.nombre, i.kilos, i.num_cajas, i.unidades,
+                            SELECT i.id AS id, 'inventario' AS origen,
+                                   'Entrada' AS mov, p.nombre, i.kilos, i.num_cajas, i.unidades,
                                    g.monto, i.tipo, i.motivo, i.fecha
                             FROM inventario i
                             JOIN productos p ON p.id = i.producto_id
-                            LEFT JOIN gastos g ON g.id = i.gasto_id
+                            LEFT JOIN gastos   g ON g.id = i.gasto_id
                         """)
                         entradas = cur.fetchall()
                         cur.execute("""
-                            SELECT 'Merma' AS mov, p.nombre, m.kilos, m.num_cajas, m.unidades,
-                                   NULL, '' AS tipo, m.motivo, m.fecha
+                            SELECT m.id AS id, 'mermas' AS origen,
+                                   'Merma'  AS mov, p.nombre, m.kilos, m.num_cajas, m.unidades,
+                                   NULL AS monto, '' AS tipo, m.motivo, m.fecha
                             FROM mermas m
                             JOIN productos p ON p.id = m.producto_id
                         """)
                         mermas = cur.fetchall()
                 else:
-                    # Fallback legacy: join por texto (menos confiable)
+                    # Sin FK a gastos: intento de join por texto/fecha (legacy)
                     if filtro:
                         like = f"%{filtro}%"
                         cur.execute("""
-                            SELECT 'Entrada' AS mov, p.nombre, i.kilos, i.num_cajas, i.unidades,
-                                   COALESCE(g.monto, 0), i.tipo, i.motivo, i.fecha
+                            SELECT i.id AS id, 'inventario' AS origen,
+                                   'Entrada' AS mov, p.nombre, i.kilos, i.num_cajas, i.unidades,
+                                   COALESCE(g.monto, 0) AS monto, i.tipo, i.motivo, i.fecha
                             FROM inventario i
                             JOIN productos p ON p.id = i.producto_id
-                            LEFT JOIN gastos g
-                              ON g.tipo = 'Compra' AND g.descripcion = p.nombre AND g.fecha = i.fecha
+                            LEFT JOIN gastos   g
+                              ON g.tipo='Compra' AND g.descripcion=p.nombre AND g.fecha=i.fecha
                             WHERE p.nombre LIKE ? OR i.motivo LIKE ? OR IFNULL(i.tipo,'') LIKE ?
                         """, (like, like, like))
                         entradas = cur.fetchall()
                         cur.execute("""
-                            SELECT 'Merma' AS mov, p.nombre, m.kilos, m.num_cajas, m.unidades,
-                                   NULL, '' AS tipo, m.motivo, m.fecha
+                            SELECT m.id AS id, 'mermas' AS origen,
+                                   'Merma'  AS mov, p.nombre, m.kilos, m.num_cajas, m.unidades,
+                                   NULL AS monto, '' AS tipo, m.motivo, m.fecha
                             FROM mermas m
                             JOIN productos p ON p.id = m.producto_id
                             WHERE p.nombre LIKE ? OR m.motivo LIKE ?
@@ -1680,27 +1716,32 @@ class InventarioFrame(tk.Frame):
                         mermas = cur.fetchall()
                     else:
                         cur.execute("""
-                            SELECT 'Entrada' AS mov, p.nombre, i.kilos, i.num_cajas, i.unidades,
-                                   COALESCE(g.monto, 0), i.tipo, i.motivo, i.fecha
+                            SELECT i.id AS id, 'inventario' AS origen,
+                                   'Entrada' AS mov, p.nombre, i.kilos, i.num_cajas, i.unidades,
+                                   COALESCE(g.monto, 0) AS monto, i.tipo, i.motivo, i.fecha
                             FROM inventario i
                             JOIN productos p ON p.id = i.producto_id
-                            LEFT JOIN gastos g
-                              ON g.tipo = 'Compra' AND g.descripcion = p.nombre AND g.fecha = i.fecha
+                            LEFT JOIN gastos   g
+                              ON g.tipo='Compra' AND g.descripcion=p.nombre AND g.fecha=i.fecha
                         """)
                         entradas = cur.fetchall()
                         cur.execute("""
-                            SELECT 'Merma' AS mov, p.nombre, m.kilos, m.num_cajas, m.unidades,
-                                   NULL, '' AS tipo, m.motivo, m.fecha
+                            SELECT m.id AS id, 'mermas' AS origen,
+                                   'Merma'  AS mov, p.nombre, m.kilos, m.num_cajas, m.unidades,
+                                   NULL AS monto, '' AS tipo, m.motivo, m.fecha
                             FROM mermas m
                             JOIN productos p ON p.id = m.producto_id
                         """)
                         mermas = cur.fetchall()
 
             filas = entradas + mermas
-            filas.sort(key=lambda r: r[8], reverse=True)  # fecha ISO DESC
+            # Fecha está en índice 10 (ID=0, Origen=1, ... Fecha=10)
+            filas.sort(key=lambda r: r[10], reverse=True)
 
-            for mov, nombre, kilos, cajas, unidades, monto, tipo, motivo, fecha in filas:
+            for (rid, origen, mov, nombre, kilos, cajas, unidades, monto, tipo, motivo, fecha_iso) in filas:
                 self.tree.insert("", "end", values=(
+                    int(rid),
+                    origen,
                     mov,
                     nombre,
                     f"{redondear_dos_decimales(kilos):.2f}",
@@ -1709,13 +1750,14 @@ class InventarioFrame(tk.Frame):
                     (formato_moneda(monto) if (monto is not None and monto != "") else ""),
                     (tipo or ""),
                     (motivo or ""),
-                    formatear_fecha(fecha)
+                    formatear_fecha(fecha_iso)
                 ))
 
             set_treeview_stripes(self.tree, even_bg=PALETTE.get("alt_row"), odd_bg=PALETTE.get("panel"))
 
         except Exception as e:
             messagebox.showerror("Error", f"No se pudieron cargar los movimientos.\n{e}")
+    
 
     # ---------------------------
     # Proveedores (CRUD)
@@ -1763,6 +1805,9 @@ class InventarioFrame(tk.Frame):
             messagebox.showinfo("Éxito", "Proveedor agregado.")
         except Exception as e:
             messagebox.showerror("Error", f"No se pudo agregar el proveedor.\n{e}")
+        self.prov_tel_entry.bind("<Return>", lambda e: self.agregar_proveedor())
+        if hasattr(self, "prov_dir_entry"):
+            self.prov_dir_entry.bind("<Return>", lambda e: self.agregar_proveedor())
 
     def editar_proveedor(self):
         sel = self._proveedor_seleccionado()
@@ -1857,7 +1902,7 @@ class InventarioFrame(tk.Frame):
         if not sel:
             messagebox.showerror("Error", "Selecciona un proveedor en la tabla.")
             return
-        pid, nombre, _tel = sel
+        pid, nombre, _tel = sel, _dir = sel
         if not messagebox.askyesno("Confirmar", f"¿Eliminar al proveedor '{nombre}'?"):
             return
         try:
@@ -1920,6 +1965,335 @@ class InventarioFrame(tk.Frame):
 
         for c in columnas:
             tree.heading(c, text=c, command=lambda cc=c: sort_by(cc))
+    def _selected_mov(self):
+        """Devuelve dict con los valores de la fila seleccionada o None."""
+        sel = self.tree.selection()
+        if not sel:
+            return None
+        vals = self.tree.item(sel[0], "values")
+        if not vals or len(vals) < 11:
+            return None
+        return {
+            "id": int(vals[0]),
+            "origen": str(vals[1]),  # 'inventario' | 'mermas'
+        }
+
+    def modificar_movimiento(self):
+        info = self._selected_mov()
+        if not info:
+            messagebox.showwarning("Editar", "Selecciona un movimiento en la tabla.")
+            return
+
+        mov_id = info["id"]
+        origen = info["origen"]  # 'inventario' | 'mermas'
+
+        try:
+            with get_connection() as conn:
+                cur = conn.cursor()
+                if origen == "inventario":
+                    cur.execute("""
+                        SELECT i.producto_id, p.nombre, i.kilos, i.num_cajas, i.unidades,
+                               IFNULL(i.tipo,''), IFNULL(i.motivo,''), i.fecha,
+                               i.gasto_id, i.deuda_proveedor_id, i.monto
+                        FROM inventario i
+                        JOIN productos p ON p.id = i.producto_id
+                        WHERE i.id = ?
+                    """, (int(mov_id),))
+                    row = cur.fetchone()
+                    if not row:
+                        raise ValueError("Movimiento no encontrado.")
+                    (prod_id_old, prod_nom_old, k_old, c_old, u_old,
+                     tipo_old, motivo_old, fecha_old,
+                     gasto_id, deuda_id, monto_old) = row
+                else:  # mermas
+                    cur.execute("""
+                        SELECT m.producto_id, p.nombre, m.kilos, m.num_cajas, m.unidades,
+                               IFNULL(m.motivo,''), m.fecha
+                        FROM mermas m
+                        JOIN productos p ON p.id = m.producto_id
+                        WHERE m.id = ?
+                    """, (int(mov_id),))
+                    row = cur.fetchone()
+                    if not row:
+                        raise ValueError("Movimiento no encontrado.")
+                    (prod_id_old, prod_nom_old, k_old, c_old, u_old,
+                     motivo_old, fecha_old) = row
+                    tipo_old = "Merma"  # etiqueta fija en UI
+        except Exception as e:
+            messagebox.showerror("Editar", f"No se pudo leer el movimiento.\n{e}")
+            return
+
+        # --- Diálogo de edición ---
+        win = tk.Toplevel(self)
+        win.title(f"Editar movimiento #{mov_id}")
+        try:
+            win.configure(bg=PALETTE["bg"])
+        except Exception:
+            pass
+        win.transient(self.winfo_toplevel())
+
+        # Producto
+        tk.Label(win, text="Producto:", bg=PALETTE["bg"], fg=PALETTE["text"]).grid(row=0, column=0, padx=10, pady=6, sticky="e")
+        cb_prod = self._combobox(win, width=30, row=0, column=1, padx=10, pady=6, sticky="we")
+        cb_prod["values"] = list(self.productos.keys())
+        cb_prod.set(prod_nom_old)
+        win.grid_columnconfigure(1, weight=1)
+
+        # Kilos / Cajas / Unidades
+        tk.Label(win, text="Kilos:", bg=PALETTE["bg"], fg=PALETTE["text"]).grid(row=1, column=0, padx=10, pady=6, sticky="e")
+        e_kilos = ttk.Entry(win, width=14); e_kilos.grid(row=1, column=1, padx=10, pady=6, sticky="w")
+        e_kilos.insert(0, f"{float(k_old or 0):.2f}")
+        adjuntar_validador_2_decimales(e_kilos, permitir_vacio=True)
+
+        tk.Label(win, text="Cajas:", bg=PALETTE["bg"], fg=PALETTE["text"]).grid(row=2, column=0, padx=10, pady=6, sticky="e")
+        e_cajas = ttk.Entry(win, width=14); e_cajas.grid(row=2, column=1, padx=10, pady=6, sticky="w")
+        e_cajas.insert(0, f"{float(c_old or 0):.2f}")
+        adjuntar_validador_2_decimales(e_cajas, permitir_vacio=True)
+
+        tk.Label(win, text="Unidades:", bg=PALETTE["bg"], fg=PALETTE["text"]).grid(row=3, column=0, padx=10, pady=6, sticky="e")
+        e_unid = ttk.Entry(win, width=14); e_unid.grid(row=3, column=1, padx=10, pady=6, sticky="w")
+        e_unid.insert(0, str(int(u_old or 0)))
+
+        # Tipo (solo inventario)
+        if origen == "inventario":
+            tk.Label(win, text="Tipo:", bg=PALETTE["bg"], fg=PALETTE["text"]).grid(row=4, column=0, padx=10, pady=6, sticky="e")
+            cb_tipo = self._combobox(win, width=18, row=4, column=1, padx=10, pady=6, sticky="w")
+            cb_tipo["values"] = ["Compra", "Ajuste", "Devolución", "Otro"]
+            cb_tipo.set(tipo_old or "Compra")
+        else:
+            tk.Label(win, text="Tipo:", bg=PALETTE["bg"], fg=PALETTE["text"]).grid(row=4, column=0, padx=10, pady=6, sticky="e")
+            lbl_tipo = tk.Label(win, text="Merma", bg=PALETTE["bg"], fg=PALETTE["text"])
+            lbl_tipo.grid(row=4, column=1, padx=10, pady=6, sticky="w")
+            cb_tipo = None
+
+        # Motivo
+        tk.Label(win, text="Motivo:", bg=PALETTE["bg"], fg=PALETTE["text"]).grid(row=6, column=0, padx=10, pady=6, sticky="e")
+        e_motivo = ttk.Entry(win, width=48); e_motivo.grid(row=6, column=1, padx=10, pady=6, sticky="we")
+        e_motivo.insert(0, motivo_old or "")
+
+        # Fecha
+        tk.Label(win, text="Fecha (YYYY-MM-DD HH:MM:SS):", bg=PALETTE["bg"], fg=PALETTE["text"]).grid(row=7, column=0, padx=10, pady=6, sticky="e")
+        e_fecha = ttk.Entry(win, width=22); e_fecha.grid(row=7, column=1, padx=10, pady=6, sticky="w")
+        e_fecha.insert(0, fecha_old or datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+
+        # Monto
+        tk.Label(win, text="Monto:", bg=PALETTE["bg"], fg=PALETTE["text"]).grid(row=5, column=0, padx=10, pady=6, sticky="e")
+        if origen == "inventario":
+            e_monto = ttk.Entry(win, width=14)
+            e_monto.grid(row=5, column=1, padx=10, pady=6, sticky="w")
+            e_monto.insert(0, f"{float(monto_old or 0):.2f}")
+            adjuntar_validador_2_decimales(e_monto, permitir_vacio=True)
+        else:
+            e_monto = ttk.Entry(win, width=14, state="disabled")
+            e_monto.grid(row=5, column=1, padx=10, pady=6, sticky="w")
+            e_monto.insert(0, "0.00")
+
+        def guardar():
+            # Leer y validar
+            nuevo_prod_nom = (cb_prod.get() or "").strip()
+            nuevo_prod_id = self.productos.get(nuevo_prod_nom)
+            if not nuevo_prod_id:
+                messagebox.showerror("Editar", "Selecciona un producto válido.", parent=win); return
+
+            try:
+                k_new = to_float(e_kilos.get() or 0, permitir_cero=True)
+                c_new = to_float(e_cajas.get() or 0, permitir_cero=True)
+                u_new = to_int(e_unid.get()  or 0, permitir_cero=True)
+            except Exception:
+                messagebox.showerror("Editar", "Valores inválidos para kilos/cajas/unidades.", parent=win); return
+            if any(x < 0 for x in (k_new, c_new, u_new)):
+                messagebox.showerror("Editar", "No se permiten valores negativos.", parent=win); return
+            if (k_new <= 0) and (c_new <= 0) and (u_new <= 0):
+                messagebox.showerror("Editar", "Ingresa al menos un valor mayor a 0.", parent=win); return
+
+            nuevo_tipo = (cb_tipo.get().strip() if cb_tipo else "Merma")
+            nuevo_motivo = (e_motivo.get() or "").strip()
+            nueva_fecha = (e_fecha.get() or datetime.now().strftime("%Y-%m-%d %H:%M:%S")).strip()
+
+            if origen == "inventario":
+                try:
+                    nuevo_monto = to_float(e_monto.get() or 0.0, permitir_cero=True)
+                except Exception:
+                    messagebox.showerror("Editar", "Monto inválido.", parent=win); return
+                if nuevo_monto < 0:
+                    messagebox.showerror("Editar", "El monto no puede ser negativo.", parent=win); return
+            else:
+                nuevo_monto = 0.0        
+            try:
+                with get_connection() as conn:
+                    cur = conn.cursor()
+
+                    if origen == "inventario":
+                        # 1) Revertir efecto anterior en stock
+                        cur.execute("""
+                            UPDATE productos
+                            SET kilos = kilos - ?, num_cajas = num_cajas - ?, unidades = unidades - ?
+                            WHERE id = ?
+                        """, (float(k_old or 0), float(c_old or 0), int(u_old or 0), int(prod_id_old)))
+
+                        # 2) Aplicar nuevo efecto en stock (entrada suma)
+                        cur.execute("""
+                            UPDATE productos
+                            SET kilos = kilos + ?, num_cajas = num_cajas + ?, unidades = unidades + ?
+                            WHERE id = ?
+                        """, (float(k_new), float(c_new), int(u_new), int(nuevo_prod_id)))
+
+                        # 3) Actualizar movimiento
+                        cur.execute("""
+                            UPDATE inventario
+                            SET producto_id = ?, kilos = ?, num_cajas = ?, unidades = ?,
+                                tipo = ?, motivo = ?, fecha = ?, monto = ?
+                            WHERE id = ?
+                        """, (int(nuevo_prod_id), float(k_new), float(c_new), int(u_new),
+                            nuevo_tipo, nuevo_motivo, nueva_fecha, float(nuevo_monto), int(mov_id)))
+
+                    else:  # mermas
+                        # Validar stock suficiente para la nueva merma
+                        cur.execute("SELECT kilos, num_cajas, unidades FROM productos WHERE id = ?", (int(nuevo_prod_id),))
+                        srow = cur.fetchone()
+                        sk, sc, su = (float(srow[0] or 0), float(srow[1] or 0), int(srow[2] or 0))
+                        # Reponer primero la merma anterior (se devuelve stock)
+                        # Luego verificar que al aplicar la nueva merma, alcanza.
+                        sk_repuesto = sk + float(k_old or 0) if nuevo_prod_id == prod_id_old else sk
+                        sc_repuesto = sc + float(c_old or 0) if nuevo_prod_id == prod_id_old else sc
+                        su_repuesto = su + int(u_old or 0)   if nuevo_prod_id == prod_id_old else su
+
+                        if (k_new > sk_repuesto) or (c_new > sc_repuesto) or (u_new > su_repuesto):
+                            messagebox.showerror(
+                                "Stock insuficiente",
+                                "La merma nueva excede el stock disponible tras reponer la merma anterior.",
+                                parent=win
+                            )
+                            return
+
+                        # 1) Reponer efecto anterior (merma resta -> reponer = sumar)
+                        cur.execute("""
+                            UPDATE productos
+                            SET kilos = kilos + ?, num_cajas = num_cajas + ?, unidades = unidades + ?
+                            WHERE id = ?
+                        """, (float(k_old or 0), float(c_old or 0), int(u_old or 0), int(prod_id_old)))
+
+                        # 2) Aplicar nuevo efecto de merma (resta)
+                        cur.execute("""
+                            UPDATE productos
+                            SET kilos = kilos - ?, num_cajas = num_cajas - ?, unidades = unidades - ?
+                            WHERE id = ?
+                        """, (float(k_new), float(c_new), int(u_new), int(nuevo_prod_id)))
+
+                        # 3) Actualizar merma
+                        cur.execute("""
+                            UPDATE mermas
+                            SET producto_id = ?, kilos = ?, num_cajas = ?, unidades = ?,
+                                motivo = ?, fecha = ?
+                            WHERE id = ?
+                        """, (int(nuevo_prod_id), float(k_new), float(c_new), int(u_new),
+                              nuevo_motivo, nueva_fecha, int(mov_id)))
+
+                messagebox.showinfo("Éxito", "Movimiento actualizado.", parent=win)
+                win.destroy()
+                self.cargar_movimientos()
+                # Refrescar ficha del producto actual en encabezado
+                try:
+                    self._actualizar_info_producto(cb_prod.get())
+                except Exception:
+                    pass
+
+            except Exception as e:
+                messagebox.showerror("Error", f"No se pudo guardar el movimiento.\n{e}", parent=win)
+
+        ttk.Button(win, text="Guardar cambios", command=guardar, style="Success.TButton")\
+            .grid(row=8, column=0, columnspan=2, padx=10, pady=(8, 10), sticky="ew")
+        win.bind("<Return>", lambda _e: guardar())
+        win.bind("<Escape>", lambda _e: win.destroy())
+        try: win.grab_set()
+        except Exception: pass
+        try: win.focus_force()
+        except Exception: pass
+
+    def eliminar_movimiento(self):
+        info = self._selected_mov()
+        if not info:
+            messagebox.showwarning("Eliminar", "Selecciona un movimiento en la tabla.")
+            return
+        mov_id = info["id"]
+        origen = info["origen"]
+
+        if not messagebox.askyesno("Confirmar", f"¿Eliminar el movimiento #{mov_id}? Esta acción no se puede deshacer."):
+            return
+
+        try:
+            with get_connection() as conn:
+                cur = conn.cursor()
+
+                if origen == "inventario":
+                    # Leer efecto y vínculos monetarios
+                    cur.execute("""
+                        SELECT producto_id, kilos, num_cajas, unidades, gasto_id, deuda_proveedor_id
+                        FROM inventario WHERE id = ?
+                    """, (int(mov_id),))
+                    row = cur.fetchone()
+                    if not row:
+                        raise ValueError("Movimiento no encontrado.")
+                    prod_id, k, c, u, gasto_id, deuda_id = row
+                    prod_id = int(prod_id); k = float(k or 0); c = float(c or 0); u = int(u or 0)
+
+                    # Si hay deuda vinculada, no podemos borrar si ya tiene pagos aplicados
+                    if deuda_id is not None:
+                        cur.execute("SELECT monto, saldo FROM deudas_proveedores WHERE id = ?", (int(deuda_id),))
+                        d = cur.fetchone()
+                        if d:
+                            monto_deuda, saldo_deuda = float(d[0] or 0), float(d[1] or 0)
+                            # ¿Pagos asociados?
+                            cur.execute("SELECT COUNT(*) FROM pagos_proveedores WHERE deuda_proveedor_id = ?", (int(deuda_id),))
+                            pagos_count = int(cur.fetchone()[0])
+                            if pagos_count > 0 or saldo_deuda < monto_deuda:
+                                raise ValueError(
+                                    "No es posible eliminar la entrada porque la deuda vinculada tiene pagos aplicados.\n"
+                                    "Elimina/ajusta primero los pagos y/o la deuda."
+                                )
+                        # Si no hay pagos, podemos borrar la deuda
+                        cur.execute("DELETE FROM deudas_proveedores WHERE id = ?", (int(deuda_id),))
+
+                    # Si hay gasto vinculado, eliminarlo
+                    if gasto_id is not None:
+                        cur.execute("DELETE FROM gastos WHERE id = ?", (int(gasto_id),))
+
+                    # Revertir stock de la entrada (restar lo que sumó)
+                    cur.execute("""
+                        UPDATE productos
+                        SET kilos = kilos - ?, num_cajas = num_cajas - ?, unidades = unidades - ?
+                        WHERE id = ?
+                    """, (float(k), float(c), int(u), int(prod_id)))
+
+                    # Eliminar movimiento
+                    cur.execute("DELETE FROM inventario WHERE id = ?", (int(mov_id),))
+
+                else:  # mermas
+                    cur.execute("""
+                        SELECT producto_id, kilos, num_cajas, unidades
+                        FROM mermas WHERE id = ?
+                    """, (int(mov_id),))
+                    row = cur.fetchone()
+                    if not row:
+                        raise ValueError("Movimiento no encontrado.")
+                    prod_id, k, c, u = row
+                    prod_id = int(prod_id); k = float(k or 0); c = float(c or 0); u = int(u or 0)
+
+                    # Revertir la merma (devolver stock)
+                    cur.execute("""
+                        UPDATE productos
+                        SET kilos = kilos + ?, num_cajas = num_cajas + ?, unidades = unidades + ?
+                        WHERE id = ?
+                    """, (float(k), float(c), int(u), int(prod_id)))
+
+                    # Eliminar movimiento
+                    cur.execute("DELETE FROM mermas WHERE id = ?", (int(mov_id),))
+
+            messagebox.showinfo("Éxito", "Movimiento eliminado.")
+            self.cargar_movimientos()
+
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo eliminar el movimiento.\n{e}")
 
 
 # Punto de entrada para main.py

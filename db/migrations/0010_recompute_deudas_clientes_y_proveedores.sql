@@ -1,6 +1,5 @@
 -- 0010_recompute_deudas_clientes_y_proveedores.sql
 PRAGMA foreign_keys = ON;
-BEGIN TRANSACTION;
 
 -- Recalcula deudas de clientes = ventas a crédito activas - pagos
 UPDATE clientes AS c
@@ -20,7 +19,7 @@ SET deuda_total = ROUND(
     ), 0)
 , 2);
 
--- Recalcula deudas de proveedores = compras a crédito - pagos a proveedor
+-- Recalcula deudas de proveedores = compras a crédito - pagos a proveedor (singular legacy)
 UPDATE proveedores AS pr
 SET deuda_total = ROUND(
     IFNULL((
@@ -36,5 +35,3 @@ SET deuda_total = ROUND(
         WHERE pp.proveedor_id = pr.id
     ), 0)
 , 2);
-
-COMMIT;

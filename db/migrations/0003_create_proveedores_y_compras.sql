@@ -1,7 +1,6 @@
 -- 0003_create_proveedores_y_compras.sql
 PRAGMA foreign_keys = ON;
 
--- Proveedores
 CREATE TABLE IF NOT EXISTS proveedores (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     nombre       TEXT NOT NULL,
@@ -10,7 +9,6 @@ CREATE TABLE IF NOT EXISTS proveedores (
 );
 CREATE INDEX IF NOT EXISTS idx_proveedores_nombre ON proveedores(nombre);
 
--- Compras a proveedores (por kilos o por unidades; num_cajas solo informativo)
 CREATE TABLE IF NOT EXISTS compras (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     proveedor_id  INTEGER NOT NULL,

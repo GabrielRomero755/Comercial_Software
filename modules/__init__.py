@@ -1,4 +1,4 @@
-# ui/__init__.py
+# modules/__init__.py
 # -----------------------------------------------------------
 # Paquete UI
 # Re-exporta utilidades de helpers y theme para importación

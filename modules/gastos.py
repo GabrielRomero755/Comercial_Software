@@ -358,13 +358,19 @@ class GastosFrame(tk.Frame):
             return
         try:
             with get_connection() as conn:
-                rows = conn.execute("SELECT id, nombre FROM empleados ORDER BY nombre COLLATE NOCASE").fetchall()
-            self._empleados_map = { (r[1] if isinstance(r, tuple) else r["nombre"]) : (r[0] if isinstance(r, tuple) else r["id"]) for r in rows }
+                rows = conn.execute(
+                    "SELECT id, nombre FROM empleados ORDER BY nombre COLLATE NOCASE"
+                ).fetchall()
+            self._empleados_map = {
+                (r[1] if isinstance(r, tuple) else r["nombre"]): (r[0] if isinstance(r, tuple) else r["id"])
+                for r in rows
+            }
             self._empleado_combo["values"] = list(self._empleados_map.keys())
-            if self._empleados_map and not self._empleado_combo.get():
-                self._empleado_combo.current(0)
+            # ⬇️ Dejar SIEMPRE vacío por defecto, como el de cliente
+            self._empleado_combo.set("")
         except Exception as e:
             messagebox.showerror("Error", f"No se pudieron cargar los empleados.\n{e}")
+
 
     def _cargar_clientes(self):
         if not (self._gastos_has_cliente_fk and self._cliente_combo):

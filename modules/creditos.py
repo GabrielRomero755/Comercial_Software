@@ -301,25 +301,26 @@ class CreditosFrame(tk.Frame):
         # ---------- Fila 3: Botones ----------
         btn_frame = self._panel(self._scroll_body)
         btn_frame.grid(row=3, column=0, sticky="ew", padx=10, pady=(0, 10))
+
+        # Primera fila (ya la tienes)
         for c in range(5):
             btn_frame.grid_columnconfigure(c, weight=1, uniform="btns")
 
         self._btn(btn_frame, "Actualizar Deuda", "TButton", self.actualizar_deuda,
-                  row=0, column=0, padx=5, pady=4, sticky="ew")
+                row=0, column=0, padx=5, pady=4, sticky="ew")
         self._btn(btn_frame, "Abonar Monto", "Success.TButton", self.abonar_monto,
-                  row=0, column=1, padx=5, pady=4, sticky="ew")
+                row=0, column=1, padx=5, pady=4, sticky="ew")
         self._btn(btn_frame, "Pagar Deuda", "Danger.TButton", self.pagar_deuda,
-                  row=0, column=2, padx=5, pady=4, sticky="ew")
+                row=0, column=2, padx=5, pady=4, sticky="ew")
         self._btn(btn_frame, "Modificar Cliente", "TButton", self.modificar_cliente,
-                  row=0, column=3, padx=5, pady=4, sticky="ew")
+                row=0, column=3, padx=5, pady=4, sticky="ew")
         self._btn(btn_frame, "Eliminar Cliente", "Danger.TButton", self.eliminar_cliente,
-                  row=0, column=4, padx=5, pady=4, sticky="ew")
+                row=0, column=4, padx=5, pady=4, sticky="ew")
+        
         self._build_ui_gestion_por_venta()
         self._cargar_clientes_combo_creditos()
-        self._rango_hoy()  # inicializa fechas
-        self._recargar_panel_creditos()
-
-
+        self._rango_hoy()  
+        
     # -------------------------------------------------------
     # Data / Listado
     # -------------------------------------------------------
@@ -387,9 +388,11 @@ class CreditosFrame(tk.Frame):
         self.cargar_clientes((self.buscar_entry.get() or "").strip())
 
     def actualizar_deuda(self):
-        """Refresca la lista desde DB (la lógica de deuda se mantiene en ventas/pagos)."""
+        """Recalcula deuda_total desde ventas/pagos y refresca la tabla."""
+        self._recalcular_deuda_todos()
         self.cargar_clientes()
-        messagebox.showinfo("Info", "Las deudas se refrescaron desde la base de datos.")
+        messagebox.showinfo("Info", "Las deudas se recalcularon desde ventas y pagos.")
+
 
     # -------------------------------------------------------
     # CRUD Clientes
@@ -603,6 +606,7 @@ class CreditosFrame(tk.Frame):
     def pagar_deuda(self):
         """Pone la deuda_total del cliente en 0 y registra pago total en la tabla de pagos disponible."""
         sel = self._cliente_sel()
+
         if not sel:
             messagebox.showerror("Error", "Selecciona un cliente.")
             return
@@ -672,38 +676,54 @@ class CreditosFrame(tk.Frame):
         def confirmar(_=None):
             txt = (ent_monto.get() or "").strip()
             try:
-                abono = to_float(txt, permitir_cero=False)
+                abono = to_float(txt, permitir_cero=False)  # debe ser > 0
             except ValueError:
                 messagebox.showerror("Error", "Ingresa un monto válido.", parent=win)
                 return
-            if abono <= 0:
+
+            aplicado = min(abono, deuda_actual)
+            aplicado_red = redondear_dos_decimales(aplicado)
+            if aplicado_red <= 0:
                 messagebox.showerror("Error", "El abono debe ser mayor a 0.", parent=win)
                 return
 
-            aplicado = min(abono, deuda_actual)
-            nuevo_saldo = redondear_dos_decimales(deuda_actual - aplicado)
+            nuevo_saldo = max(0.0, redondear_dos_decimales(deuda_actual - aplicado_red))
 
             try:
                 with get_connection() as conn:
                     cur = conn.cursor()
-                    # 1) Registrar bitácora
+                    # 1) Registrar bitácora (monto POSITIVO)
                     if self._tabla_pagos == "pagos_cliente":
                         cur.execute(
                             "INSERT INTO pagos_cliente (cliente_id, venta_id, monto, fecha, nota) "
                             "VALUES (?, NULL, ?, datetime('now','localtime'), ?)",
-                            (cliente_id, redondear_dos_decimales(aplicado), "Abono a crédito"),
+                            (cliente_id, aplicado_red, "Abono a crédito"),
                         )
                     elif self._tabla_pagos == "pagos_credito":
                         cur.execute(
                             "INSERT INTO pagos_credito (cliente_id, monto, descripcion) VALUES (?, ?, ?)",
-                            (cliente_id, redondear_dos_decimales(aplicado), "Abono a crédito"),
+                            (cliente_id, aplicado_red, "Abono a crédito"),
                         )
-                    # 2) Actualizar saldo
+                    # 2) Ajustar saldo mostrado (protección a 2 decimales)
                     cur.execute("UPDATE clientes SET deuda_total = ? WHERE id = ?", (nuevo_saldo, cliente_id))
+
+                # Recalcular desde ventas/pagos para asegurar sincronía global
+                try:
+                    self._recalcular_deuda_global_cliente(cliente_id)
+                except Exception:
+                    pass
+
+                # Refrescos de UI
                 self.cargar_clientes()
+                try:
+                    self._recargar_panel_creditos()
+                except Exception:
+                    pass
+
                 messagebox.showinfo(
                     "Éxito",
-                    f"Se abonó {formato_moneda(aplicado)} a '{nombre}'.\nSaldo restante: {formato_moneda(nuevo_saldo)}.",
+                    f"Se abonó {formato_moneda(aplicado_red)} a '{nombre}'.\n"
+                    f"Saldo restante: {formato_moneda(nuevo_saldo)}.",
                     parent=win,
                 )
                 win.destroy()
@@ -725,6 +745,89 @@ class CreditosFrame(tk.Frame):
             ent_monto.focus_set()
         except Exception:
             pass
+        
+    def _recalcular_deuda_todos(self):
+        """Recalcula clientes.deuda_total a partir de ventas y pagos (sin fechas)."""
+        try:
+            with get_connection() as conn:
+                cur = conn.cursor()
+                if self._tabla_pagos == "pagos_cliente" and self._pagos_has_venta_id:
+                    # Suma de (total venta - pagos por venta), excluyendo CANCELADAS
+                    cur.execute("""
+                        UPDATE clientes AS c
+                        SET deuda_total = IFNULL((
+                            SELECT ROUND(SUM(
+                                IFNULL(v.total, v.kilos * v.precio) -
+                                IFNULL((SELECT SUM(monto) FROM pagos_cliente pc WHERE pc.venta_id = v.id), 0)
+                            ), 2)
+                            FROM ventas v
+                            WHERE LOWER(IFNULL(v.tipo_venta,''))='credito'
+                            AND v.cliente_id = c.id
+                            AND UPPER(IFNULL(v.estado,'')) <> 'CANCELADA'
+                        ), 0)
+                    """)
+                elif self._tabla_pagos == "pagos_credito":
+                    # Legacy: total crédito - sum(pagos_credito)
+                    cur.execute("""
+                        UPDATE clientes AS c
+                        SET deuda_total = IFNULL((
+                            SELECT ROUND(
+                                IFNULL((
+                                    SELECT SUM(IFNULL(v.total, v.kilos * v.precio))
+                                    FROM ventas v
+                                    WHERE LOWER(IFNULL(v.tipo_venta,''))='credito'
+                                    AND v.cliente_id = c.id
+                                    AND UPPER(IFNULL(v.estado,'')) <> 'CANCELADA'
+                                ), 0)
+                                - IFNULL((
+                                    SELECT SUM(monto) FROM pagos_credito pc WHERE pc.cliente_id = c.id
+                                ), 0)
+                            , 2)
+                        ), 0)
+                    """)
+                # Si no existe tabla de pagos, no hay nada que recalcular más allá de lo ya guardado.
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo recalcular la deuda.\n{e}")
+
+
+    def _recalcular_deuda_global_cliente(self, cid: int):
+        """Recalcula la deuda_total de UN cliente desde ventas/pagos."""
+        try:
+            with get_connection() as conn:
+                cur = conn.cursor()
+                if self._tabla_pagos == "pagos_cliente" and self._pagos_has_venta_id:
+                    row = cur.execute("""
+                        SELECT ROUND(SUM(
+                            IFNULL(v.total, v.kilos * v.precio) -
+                            IFNULL((SELECT SUM(monto) FROM pagos_cliente pc WHERE pc.venta_id = v.id), 0)
+                        ), 2)
+                        FROM ventas v
+                        WHERE LOWER(IFNULL(v.tipo_venta,''))='credito'
+                        AND v.cliente_id = ?
+                        AND UPPER(IFNULL(v.estado,'')) <> 'CANCELADA'
+                    """, (cid,)).fetchone()
+                    deuda = float(row[0] or 0.0)
+                elif self._tabla_pagos == "pagos_credito":
+                    tot = cur.execute("""
+                        SELECT IFNULL(SUM(IFNULL(v.total, v.kilos * v.precio)), 0)
+                        FROM ventas v
+                        WHERE LOWER(IFNULL(v.tipo_venta,''))='credito'
+                        AND v.cliente_id = ?
+                        AND UPPER(IFNULL(v.estado,'')) <> 'CANCELADA'
+                    """, (cid,)).fetchone()[0] or 0.0
+                    pags = cur.execute("""
+                        SELECT IFNULL(SUM(monto), 0) FROM pagos_credito WHERE cliente_id = ?
+                    """, (cid,)).fetchone()[0] or 0.0
+                    deuda = round(float(tot) - float(pags), 2)
+                    if deuda < 0: deuda = 0.0
+                else:
+                    # Sin tabla de pagos: usa el valor guardado (no tocar)
+                    return
+                cur.execute("UPDATE clientes SET deuda_total = ? WHERE id = ?", (deuda, cid))
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo recalcular la deuda del cliente.\n{e}")
+
+        
 # ---------- Gestión por VENTA (UI estilo panel proveedor) ----------
 
     def _build_ui_gestion_por_venta(self):
@@ -841,6 +944,8 @@ class CreditosFrame(tk.Frame):
             .pack(side="left", padx=4)
         ttk.Button(actions, text="Ver pagos de la venta", style="TButton", command=self._ver_pagos_de_venta)\
             .pack(side="left", padx=4)
+            
+        
 
     def _cargar_clientes_combo_creditos(self):
         try:
@@ -1101,6 +1206,14 @@ class CreditosFrame(tk.Frame):
         if not sel:
             messagebox.showinfo("Abono", "Selecciona una venta en la tabla de la izquierda.")
             return
+
+        # Verificar estado de la venta seleccionada de forma segura
+        vals_sel = self.tree_compras.item(self.tree_compras.focus(), "values") or ()
+        estado = (vals_sel[5].upper() if len(vals_sel) > 5 and vals_sel[5] else "")
+        if estado == "CANCELADA":
+            messagebox.showwarning("Abono", "No se puede abonar a una venta cancelada.")
+            return
+
         venta_id, saldo_actual = sel
         if saldo_actual <= 0:
             messagebox.showinfo("Abono", "Esta venta ya no tiene saldo pendiente.")
@@ -1113,49 +1226,67 @@ class CreditosFrame(tk.Frame):
             )
             return
 
-        # monto
+        # Modal de monto
         win = tk.Toplevel(self); win.title("Abonar a venta")
         try: win.configure(bg=PALETTE["bg"])
         except Exception: pass
         tk.Label(win, text=f"Saldo actual: {formato_moneda(saldo_actual)}", bg=PALETTE["bg"], fg=PALETTE["text"])\
             .grid(row=0, column=0, columnspan=2, padx=10, pady=(10,6), sticky="w")
         tk.Label(win, text="Monto a abonar:", bg=PALETTE["bg"], fg=PALETTE["text"]).grid(row=1, column=0, padx=10, pady=6, sticky="e")
-        ent = ttk.Entry(win, width=14); ent.grid(row=1, column=1, padx=10, pady=6, sticky="w")
-        adjuntar_validador_2_decimales(ent, permitir_vacio=False)
-        ent.focus_set()
+        ent_monto = ttk.Entry(win, width=14); ent_monto.grid(row=1, column=1, padx=10, pady=6, sticky="w")
+        adjuntar_validador_2_decimales(ent_monto, permitir_vacio=False)
+        ent_monto.focus_set()
 
         def confirmar(_=None):
-            txt = (ent.get() or "").strip()
+            txt = (ent_monto.get() or "").strip()
             try:
-                monto = to_float(txt, permitir_cero=False)
+                monto = to_float(txt, permitir_cero=False)  # debe ser > 0
             except Exception:
-                messagebox.showerror("Error", "Monto inválido.", parent=win); return
+                messagebox.showerror("Error", "Monto inválido.", parent=win)
+                return
+
             aplicado = min(monto, saldo_actual)
+            aplicado_red = redondear_dos_decimales(aplicado)
+            if aplicado_red <= 0:
+                messagebox.showerror("Error", "El abono debe ser mayor a 0.", parent=win)
+                return
 
             try:
                 with get_connection() as conn:
                     cur = conn.cursor()
-                    # cliente actual
                     cid = self._get_cliente_sel_combo()
-                    # 1) Insertar abono ligado a la venta
+
+                    # 1) Insertar abono ligado a la venta (monto POSITIVO)
                     cur.execute(
                         "INSERT INTO pagos_cliente (cliente_id, venta_id, monto, fecha, nota) "
                         "VALUES (?, ?, ?, datetime('now','localtime'), ?)",
-                        (cid, venta_id, redondear_dos_decimales(aplicado), "Abono a venta")
+                        (cid, venta_id, aplicado_red, "Abono a venta")
                     )
-                    # 2) Ajustar la deuda acumulada del cliente (si la usas globalmente)
+                    # 2) Ajuste rápido del acumulado mostrado
                     cur.execute(
                         "UPDATE clientes SET deuda_total = MAX(0, deuda_total - ?) WHERE id = ?",
-                        (aplicado, cid)
+                        (aplicado_red, cid)
                     )
-                win.destroy()
+
+                # Recalcular global desde ventas/pagos para asegurar sincronía con el panel de clientes
+                try:
+                    self._recalcular_deuda_global_cliente(cid)
+                except Exception:
+                    pass
+
+                # Refrescar paneles
                 self._recargar_panel_creditos()
-                messagebox.showinfo("Éxito", "Abono registrado.")
+                self.cargar_clientes()
+
+                messagebox.showinfo("Éxito", "Abono registrado.", parent=win)
+                win.destroy()
             except Exception as e:
                 messagebox.showerror("Error", f"No se pudo registrar el abono.\n{e}", parent=win)
 
-        ttk.Button(win, text="Abonar", command=confirmar, style="Success.TButton").grid(row=2, column=0, columnspan=2, pady=10)
+        ttk.Button(win, text="Abonar", command=confirmar, style="Success.TButton")\
+            .grid(row=2, column=0, columnspan=2, pady=10)
         win.bind("<Return>", confirmar)
+
 
     def _ver_pagos_de_venta(self):
         sel = self._venta_sel()

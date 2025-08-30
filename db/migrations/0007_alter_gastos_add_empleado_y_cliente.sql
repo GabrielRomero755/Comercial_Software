@@ -1,6 +1,5 @@
 -- 0007_alter_gastos_add_empleado_y_cliente.sql
 PRAGMA foreign_keys = ON;
-BEGIN TRANSACTION;
 
 -- Reconstituye 'gastos' para agregar FKs a empleados y clientes
 DROP TABLE IF EXISTS gastos_new;
@@ -17,7 +16,6 @@ CREATE TABLE gastos_new (
     FOREIGN KEY (cliente_id)  REFERENCES clientes(id)
 );
 
--- Copia datos previos (sin asociaciones)
 INSERT INTO gastos_new (id, tipo, monto, descripcion, fecha, empleado_id, cliente_id)
 SELECT id, tipo, monto, descripcion, fecha, NULL, NULL
 FROM gastos;
@@ -25,10 +23,7 @@ FROM gastos;
 DROP TABLE gastos;
 ALTER TABLE gastos_new RENAME TO gastos;
 
--- Índices
 CREATE INDEX IF NOT EXISTS idx_gastos_fecha     ON gastos(fecha);
 CREATE INDEX IF NOT EXISTS idx_gastos_tipo      ON gastos(tipo);
 CREATE INDEX IF NOT EXISTS idx_gastos_empleado  ON gastos(empleado_id);
 CREATE INDEX IF NOT EXISTS idx_gastos_cliente   ON gastos(cliente_id);
-
-COMMIT;
